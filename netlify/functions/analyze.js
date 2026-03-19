@@ -92,6 +92,42 @@ Return this exact JSON shape:
   "notes": string|null
 }`;
 
+const ADVISOR_INSIGHT_SYSTEM_PROMPT = `You are a sharp, practical retirement plan advisor.
+
+You will be given structured Form 5500 data that was already extracted from a filing.
+
+Your job is to produce:
+- an intuitive subjective summary
+- commentary on plan growth, scale, design, governance, and prospecting angle
+- stronger advisor observations than generic bullet points
+
+Rules:
+- Return exactly one valid JSON object
+- No markdown
+- No extra commentary outside the JSON
+- Be specific and thoughtful, not hypey
+- Do not invent facts not reasonably supported by the structured data
+- If something is uncertain, acknowledge that briefly
+- Use plain, direct language
+- The summary should feel like an experienced advisor sizing up the plan before a meeting
+- Mention plan growth if assets or participants suggest it
+- Mention what is strategically interesting, not just what is technically present
+
+Return this exact JSON shape:
+{
+  "subjectiveSummary": string|null,
+  "smartObservations": [string],
+  "growthCommentary": string|null,
+  "strengths": [string],
+  "watchItems": [string],
+  "opportunities": [string],
+  "questionsToAsk": [string],
+  "recommendations": [string],
+  "pitchAngle": string|null,
+  "humanTake": string|null,
+  "confidence": string|null
+}`;
+
 function jsonResponse(statusCode, body) {
   return {
     statusCode: statusCode,
@@ -214,6 +250,24 @@ function uniqueBy(arr, getKey) {
     if (seen[key]) continue;
     seen[key] = true;
     out.push(item);
+  }
+
+  return out;
+}
+
+function uniqueStrings(arr, max) {
+  var seen = {};
+  var out = [];
+  arr = Array.isArray(arr) ? arr : [];
+
+  for (var i = 0; i < arr.length; i++) {
+    var s = toStringOrNull(arr[i]);
+    if (!s) continue;
+    var k = s.toLowerCase();
+    if (seen[k]) continue;
+    seen[k] = true;
+    out.push(s);
+    if (max && out.length >= max) break;
   }
 
   return out;
@@ -417,25 +471,7 @@ function getPlanSegment(participants, assets) {
   return null;
 }
 
-function uniqueStrings(arr, max) {
-  var seen = {};
-  var out = [];
-  arr = Array.isArray(arr) ? arr : [];
-
-  for (var i = 0; i < arr.length; i++) {
-    var s = toStringOrNull(arr[i]);
-    if (!s) continue;
-    var k = s.toLowerCase();
-    if (seen[k]) continue;
-    seen[k] = true;
-    out.push(s);
-    if (max && out.length >= max) break;
-  }
-
-  return out;
-}
-
-function buildAiInsights(parsed) {
+function buildBaselineInsights(parsed) {
   var assets = parsed && parsed.financials ? parsed.financials.totalAssetsEOY : null;
   var assetsBOY = parsed && parsed.financials ? parsed.financials.totalAssetsBOY : null;
   var participants = parsed && parsed.participants
@@ -446,12 +482,8 @@ function buildAiInsights(parsed) {
         : parsed.participants.activeEndOfYear))
     : null;
 
-  var activeParticipants = parsed && parsed.participants ? parsed.participants.activeEndOfYear : null;
-  var totalParticipants = parsed && parsed.participants ? parsed.participants.totalEndOfYear : null;
   var employer = parsed && parsed.financials ? parsed.financials.employerContributions : null;
   var employee = parsed && parsed.financials ? parsed.financials.participantContributions : null;
-  var totalContrib = parsed && parsed.financials ? parsed.financials.totalContributions : null;
-  var benefitsPaid = parsed && parsed.financials ? parsed.financials.benefitsPaid : null;
   var adminExpenses = parsed && parsed.financials ? parsed.financials.adminExpenses : null;
   var participantLoans = parsed && parsed.financials ? parsed.financials.participantLoans : null;
   var likelyRecordkeeper = inferRecordkeeper(parsed);
@@ -480,167 +512,121 @@ function buildAiInsights(parsed) {
   if (!hasRoth) score += 1;
   if (adminExpenses != null && assets != null && assets > 0 && adminExpenses / assets > 0.01) score += 1;
   if (prohibitedTransactions) score += 1;
-
   score = Math.max(1, Math.min(10, Math.round(score)));
 
-  var strengths = [];
-  var watchItems = [];
-  var opportunities = [];
-  var questionsToAsk = [];
-  var recommendations = [];
-
-  if (assets != null) {
-    strengths.push('The plan has meaningful scale at roughly $' + Math.round(assets).toLocaleString() + ' in year-end assets.');
-  }
-  if (participants != null) {
-    strengths.push('The filing shows approximately ' + participants.toLocaleString() + ' participants with balances, which is enough scale to make advisory, pricing, and governance improvements matter.');
-  }
-  if (assetsPerParticipant != null) {
-    strengths.push('Average assets per participant are about $' + Math.round(assetsPerParticipant).toLocaleString() + ', which can support a more thoughtful fee and investment discussion.');
-  }
-  if (likelyRecordkeeper) {
-    strengths.push('The service provider data points to ' + likelyRecordkeeper + ' as the likely recordkeeper or key platform partner.');
-  }
-  if (audited) {
-    strengths.push('This appears to be an audited filing, which usually means there is more visibility into governance, controls, and provider relationships.');
-  }
-  if (assetGrowth != null && assetGrowth > 0) {
-    strengths.push('Plan assets increased year over year, which generally suggests a healthy or growing plan base.');
-  }
-
-  if (lateContributions) {
-    watchItems.push('Late contributions were flagged in the filing, which is both a compliance issue and a practical opening for a payroll/process conversation.');
-  }
-  if (prohibitedTransactions) {
-    watchItems.push('The filing indicates prohibited transactions, which is a meaningful governance concern and should not be treated lightly.');
-  }
-  if (loansInDefault) {
-    watchItems.push('Participant loans in default were flagged, which may point to participant financial stress or weak loan administration controls.');
-  }
-  if (!hasRoth) {
-    watchItems.push('No clear Roth feature was identified from the filing data. That does not guarantee Roth is absent, but it is worth confirming.');
-  }
-  if (!hasMatch && employee != null && employee > 0) {
-    watchItems.push('Employee deferrals are present, but no employer contribution was clearly identified. That could make the plan less competitive or less compelling from a participant-engagement standpoint.');
-  }
-  if (participantLoans != null && assets != null && assets > 0 && participantLoans / assets > 0.15) {
-    watchItems.push('Participant loans appear to be a meaningful share of plan assets, which could signal recurring liquidity pressure among participants.');
-  }
-  if (adminExpenses != null && assets != null && assets > 0 && adminExpenses / assets > 0.01) {
-    watchItems.push('Administrative expenses look elevated relative to plan assets and are worth benchmarking.');
-  }
-
-  if (!hasRoth) {
-    opportunities.push('Review whether the plan offers Roth contributions and, if not, whether adding Roth would improve competitiveness and participant flexibility.');
-  }
-  if (!hasLoans) {
-    opportunities.push('Confirm whether participant loans are intentionally excluded. If so, there may still be an opportunity to discuss participant liquidity needs and whether hardship activity is filling that gap.');
-  }
-  if (likelyRecordkeeper) {
-    opportunities.push('Benchmark ' + likelyRecordkeeper + ' on pricing, participant service, payroll integration, education support, and investment flexibility.');
-  }
-  if (assetsPerParticipant != null && assetsPerParticipant > 100000) {
-    opportunities.push('The average balance profile is strong enough to justify a serious review of fees, share classes, managed account value, and overall investment architecture.');
-  }
-  if (lateContributions) {
-    opportunities.push('A governance and process review is a natural wedge into the relationship because the filing already points to an operational weakness.');
-  }
-  if (!hasMatch) {
-    opportunities.push('If the sponsor is not making employer contributions, there may be room to discuss whether the current design still aligns with retention and participation goals.');
-  }
-  if (parsed && Array.isArray(parsed.serviceProviders) && parsed.serviceProviders.length > 0) {
-    opportunities.push('The filing identifies enough providers to frame a broader vendor-overlap and accountability conversation rather than limiting the discussion to investments alone.');
-  }
-
-  if (likelyRecordkeeper) {
-    questionsToAsk.push('How satisfied is the committee or sponsor with ' + likelyRecordkeeper + ' on service quality, payroll integration, participant support, and issue resolution?');
-  }
-  if (!hasRoth) {
-    questionsToAsk.push('Does the plan currently allow Roth contributions, and if not, has that been reviewed recently?');
-  }
-  if (!hasMatch) {
-    questionsToAsk.push('Is the current employer contribution design intentional, and is it still helping with recruiting, retention, and participation objectives?');
-  }
-  if (lateContributions) {
-    questionsToAsk.push('What caused the late contribution issue, and has the underlying payroll or remittance process been corrected?');
-  }
-  if (participantLoans != null && participantLoans > 0) {
-    questionsToAsk.push('How often are participants using loans, and does the sponsor view loan activity as a participant need, a design issue, or an education issue?');
-  }
-  if (adminExpenses != null && assets != null && assets > 0) {
-    questionsToAsk.push('When was the last full fee and service benchmark, including both hard-dollar plan costs and participant-borne costs?');
-  }
-
-  recommendations.push('Start with governance and plan design before pitching investments. A stronger conversation begins with process, participant outcomes, and vendor accountability.');
-  if (likelyRecordkeeper) {
-    recommendations.push('Prepare a benchmarking angle around the current platform, especially participant experience, service responsiveness, and total cost relative to plan size.');
-  }
-  if (!hasRoth) {
-    recommendations.push('Use Roth as a practical talking point, but verify first rather than assuming the feature is absent.');
-  }
-  if (!hasMatch) {
-    recommendations.push('Explore whether plan design is lagging the sponsor’s workforce goals. Even if they do not want a match, the discussion itself is valuable.');
-  }
-  if (participantLoans != null && participantLoans > 0) {
-    recommendations.push('If loan usage is material, pair any design discussion with participant education rather than treating loans as only a compliance data point.');
-  }
-  if (lateContributions || prohibitedTransactions || loansInDefault) {
-    recommendations.push('Lean into fiduciary process and risk control. That tends to be a stronger entry point than leading with fund performance.');
-  }
-
-  var summaryParts = [];
-  if (planSegment) summaryParts.push('This looks like a ' + planSegment.toLowerCase() + '-market defined contribution plan');
-  else summaryParts.push('This appears to be a defined contribution plan');
-  if (assets != null) summaryParts.push('with roughly $' + Math.round(assets).toLocaleString() + ' in assets');
-  if (participants != null) summaryParts.push('and about ' + participants.toLocaleString() + ' participants with balances');
-  if (likelyRecordkeeper) summaryParts.push('likely supported by ' + likelyRecordkeeper);
-  var summary = summaryParts.join(' ') + '. ';
-  summary += 'From a prospecting standpoint, the filing suggests the best entry points are ';
-  if (lateContributions || prohibitedTransactions || loansInDefault) {
-    summary += 'governance, process discipline, and fiduciary cleanup';
-  } else if (!hasRoth || !hasMatch || !hasLoans) {
-    summary += 'plan design, participant flexibility, and vendor benchmarking';
-  } else {
-    summary += 'fee benchmarking, provider evaluation, and participant experience';
-  }
-  summary += ' rather than a generic investment-only pitch.';
-
-  var humanTake = 'This is the kind of plan where a credible advisor should show up with a point of view, not just a lineup critique. ';
-  if (lateContributions || prohibitedTransactions || loansInDefault) {
-    humanTake += 'The filing gives you a legitimate compliance/process angle, which is often the cleanest door-opener because it ties directly to fiduciary oversight. ';
-  } else {
-    humanTake += 'The better approach is to diagnose whether the plan is simply functional or actually competitive and well-governed. ';
-  }
-  if (!hasRoth || !hasMatch || !hasLoans) {
-    humanTake += 'There also appear to be plan design questions worth surfacing, especially around participant flexibility and whether the current structure still fits the workforce.';
-  } else {
-    humanTake += 'That makes this more of a quality-of-service, cost, and strategic oversight conversation than a rescue mission.';
-  }
-
-  var confidence = 'medium';
-  if (parsed && parsed.planName && parsed.ein && assets != null && participants != null) confidence = 'high';
-
   return {
-    summary: summary,
     score: score,
-    strengths: uniqueStrings(strengths, 6),
-    watchItems: uniqueStrings(watchItems, 6),
-    opportunities: uniqueStrings(opportunities, 6),
-    questionsToAsk: uniqueStrings(questionsToAsk, 6),
-    recommendations: uniqueStrings(recommendations, 6),
-    pitchAngle: lateContributions || prohibitedTransactions || loansInDefault
-      ? 'Lead with fiduciary process, operational control, and sponsor-risk reduction. Use investments as a secondary discussion, not the headline.'
-      : 'Lead with benchmarking, participant outcomes, and whether the current provider/design setup is still the best fit for the plan’s size and goals.',
-    humanTake: humanTake,
-    confidence: confidence,
     meta: {
       likelyRecordkeeper: likelyRecordkeeper,
       planSegment: planSegment,
       assetsPerParticipant: assetsPerParticipant,
       hasRoth: hasRoth,
       hasLoans: hasLoans,
-      hasMatch: hasMatch
+      hasMatch: hasMatch,
+      assetGrowth: assetGrowth,
+      audited: audited,
+      lateContributions: lateContributions,
+      prohibitedTransactions: prohibitedTransactions,
+      loansInDefault: loansInDefault,
+      employeeContributions: employee,
+      employerContributions: employer
     }
+  };
+}
+
+function normalizeAdvisorInsightResponse(r) {
+  return {
+    subjectiveSummary: toStringOrNull(r && r.subjectiveSummary),
+    smartObservations: uniqueStrings(r && r.smartObservations, 6),
+    growthCommentary: toStringOrNull(r && r.growthCommentary),
+    strengths: uniqueStrings(r && r.strengths, 6),
+    watchItems: uniqueStrings(r && r.watchItems, 6),
+    opportunities: uniqueStrings(r && r.opportunities, 6),
+    questionsToAsk: uniqueStrings(r && r.questionsToAsk, 6),
+    recommendations: uniqueStrings(r && r.recommendations, 6),
+    pitchAngle: toStringOrNull(r && r.pitchAngle),
+    humanTake: toStringOrNull(r && r.humanTake),
+    confidence: toStringOrNull(r && r.confidence)
+  };
+}
+
+function buildFallbackInsights(parsed, baseline) {
+  var meta = baseline && baseline.meta ? baseline.meta : {};
+  var assets = parsed && parsed.financials ? parsed.financials.totalAssetsEOY : null;
+  var participants = parsed && parsed.participants
+    ? (parsed.participants.withAccountBalances != null
+      ? parsed.participants.withAccountBalances
+      : (parsed.participants.totalEndOfYear != null
+        ? parsed.participants.totalEndOfYear
+        : parsed.participants.activeEndOfYear))
+    : null;
+
+  var summary = 'This appears to be ';
+  if (meta.planSegment) summary += 'a ' + meta.planSegment.toLowerCase() + '-market ';
+  summary += 'defined contribution plan';
+  if (assets != null) summary += ' with roughly $' + Math.round(assets).toLocaleString() + ' in assets';
+  if (participants != null) summary += ' and about ' + participants.toLocaleString() + ' participants with balances';
+  summary += '. ';
+  if (meta.likelyRecordkeeper) {
+    summary += 'The filing also suggests ' + meta.likelyRecordkeeper + ' may be the current platform or a key provider. ';
+  }
+  if (meta.lateContributions || meta.prohibitedTransactions || meta.loansInDefault) {
+    summary += 'The most natural advisor angle here is governance, operational cleanup, and fiduciary process.';
+  } else {
+    summary += 'The most natural advisor angle here is benchmarking, plan design, and participant outcomes rather than a generic fund-performance conversation.';
+  }
+
+  var growthCommentary = null;
+  if (meta.assetGrowth != null) {
+    if (meta.assetGrowth > 0) {
+      growthCommentary = 'Assets increased year over year, which can point to a growing or healthy plan, though part of that growth may simply reflect market performance.';
+    } else if (meta.assetGrowth < 0) {
+      growthCommentary = 'Assets declined year over year, which is worth exploring because that can reflect distributions, weaker contributions, headcount changes, or market pressure.';
+    } else {
+      growthCommentary = 'Assets were roughly flat year over year, which suggests the better questions are around participation, contribution behavior, and overall plan competitiveness.';
+    }
+  }
+
+  var strengths = [];
+  var watchItems = [];
+  var opportunities = [];
+  var questionsToAsk = [];
+  var recommendations = [];
+  var smartObservations = [];
+
+  if (assets != null) strengths.push('The plan has enough asset scale to make benchmarking and oversight meaningful.');
+  if (participants != null) strengths.push('There is enough participant scale here for design and education improvements to matter.');
+  if (meta.audited) strengths.push('An audited filing generally means a more visible governance and provider landscape.');
+  if (meta.likelyRecordkeeper) smartObservations.push('The provider footprint may be as important as the investment lineup in this case.');
+  if (meta.assetsPerParticipant != null && meta.assetsPerParticipant > 100000) {
+    smartObservations.push('Average balances look strong, which usually makes fee efficiency and investment architecture more important.');
+  }
+  if (meta.lateContributions) watchItems.push('Late contributions were flagged.');
+  if (meta.prohibitedTransactions) watchItems.push('Prohibited transactions were flagged.');
+  if (meta.loansInDefault) watchItems.push('Loans in default were flagged.');
+  if (!meta.hasRoth) watchItems.push('No clear Roth feature was identified.');
+  if (!meta.hasMatch) watchItems.push('No employer contribution was clearly identified.');
+
+  if (!meta.hasRoth) opportunities.push('Review whether Roth is available and whether participant communication around tax diversification is strong enough.');
+  if (!meta.hasLoans) opportunities.push('Confirm whether loans are intentionally excluded and whether participant liquidity needs are surfacing elsewhere.');
+  if (meta.likelyRecordkeeper) opportunities.push('Benchmark the current provider setup on cost, service, and participant experience.');
+  recommendations.push('Lead with diagnosis, not product. Start by understanding plan design, service friction, and fiduciary process.');
+  questionsToAsk.push('What is the sponsor actually unhappy with today: service, fees, participation, education, payroll integration, or governance?');
+
+  return {
+    subjectiveSummary: summary,
+    smartObservations: uniqueStrings(smartObservations, 6),
+    growthCommentary: growthCommentary,
+    strengths: uniqueStrings(strengths, 6),
+    watchItems: uniqueStrings(watchItems, 6),
+    opportunities: uniqueStrings(opportunities, 6),
+    questionsToAsk: uniqueStrings(questionsToAsk, 6),
+    recommendations: uniqueStrings(recommendations, 6),
+    pitchAngle: meta.lateContributions || meta.prohibitedTransactions || meta.loansInDefault
+      ? 'Lead with governance, operational control, and sponsor-risk reduction.'
+      : 'Lead with benchmarking, participant outcomes, and whether the current setup still fits the plan.',
+    humanTake: 'This is a plan where a thoughtful advisor should show up with a real point of view on governance, design, and service quality—not just a lineup critique.',
+    confidence: 'medium'
   };
 }
 
@@ -673,6 +659,32 @@ async function callAnthropic(payload, apiKey) {
   }
 
   return data;
+}
+
+async function generateAdvisorInsights(parsed, baseline, apiKey) {
+  var prompt = {
+    parsed: parsed,
+    baseline: baseline
+  };
+
+  var response = await callAnthropic({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 1400,
+    temperature: 0.4,
+    system: ADVISOR_INSIGHT_SYSTEM_PROMPT,
+    messages: [{
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: 'Review this structured Form 5500 analysis and return the requested JSON only.\n\n' + JSON.stringify(prompt)
+        }
+      ]
+    }]
+  }, apiKey);
+
+  var rawText = extractTextFromAnthropicResponse(response);
+  return normalizeAdvisorInsightResponse(parseMaybeJSON(rawText));
 }
 
 exports.handler = async function(event) {
@@ -711,7 +723,7 @@ exports.handler = async function(event) {
       });
     }
 
-    var response = await callAnthropic({
+    var extractionResponse = await callAnthropic({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 2800,
       temperature: 0,
@@ -735,9 +747,21 @@ exports.handler = async function(event) {
       }]
     }, process.env.ANTHROPIC_API_KEY);
 
-    var rawText = extractTextFromAnthropicResponse(response);
+    var rawText = extractTextFromAnthropicResponse(extractionResponse);
     var parsed = normalizeParsed(parseMaybeJSON(rawText));
-    var insights = buildAiInsights(parsed);
+    var baseline = buildBaselineInsights(parsed);
+
+    var insights;
+    try {
+      insights = await generateAdvisorInsights(parsed, baseline, process.env.ANTHROPIC_API_KEY);
+      insights.score = baseline.score;
+      insights.meta = baseline.meta;
+      if (!insights.confidence) insights.confidence = 'medium';
+    } catch (e) {
+      insights = buildFallbackInsights(parsed, baseline);
+      insights.score = baseline.score;
+      insights.meta = baseline.meta;
+    }
 
     return jsonResponse(200, {
       ok: true,
