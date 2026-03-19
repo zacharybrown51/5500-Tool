@@ -118,14 +118,17 @@ Rules:
 - Be analytical and useful, not hypey.
 - Base comments on the data provided. If uncertain, say so briefly.
 - Keep each bullet short and practical.
+- Use the plan data rather than generic retirement-plan advice.
 
 Return this exact shape:
 {
   "summary": string|null,
+  "score": number|null,
   "strengths": [string],
   "watchItems": [string],
   "opportunities": [string],
   "questionsToAsk": [string],
+  "pitchAngle": string|null,
   "humanTake": string|null,
   "confidence": string|null
 }`;
@@ -192,10 +195,14 @@ function parseMaybeJSON(rawText) {
 function toNumberOrNull(v) {
   if (v === null || v === undefined || v === '') return null;
   if (typeof v === 'number') return Number.isFinite(v) ? v : null;
-  const stripped = String(v).replace(/[$,%\s,()]/g, '').trim();
+  const raw = String(v).trim();
+  if (!raw) return null;
+  const negative = /^\(.*\)$/.test(raw);
+  const stripped = raw.replace(/[\$,%\s,()]/g, '').trim();
   if (!stripped) return null;
   const num = Number(stripped);
-  return Number.isFinite(num) ? num : null;
+  if (!Number.isFinite(num)) return null;
+  return negative ? -num : num;
 }
 
 function toBoolOrNull(v) {
@@ -308,6 +315,158 @@ function normalizeParsed(r) {
   };
 }
 
+function inferRecordkeeper(parsed) {
+  const names = [];
+  if (Array.isArray(parsed?.serviceProviders)) {
+    for (const sp of parsed.serviceProviders) {
+      if (sp?.name) names.push(String(sp.name));
+      if (sp?.role) names.push(String(sp.role));
+    }
+  }
+  if (parsed?.auditor?.name) names.push(String(parsed.auditor.name));
+  const hay = names.join(' | ').toLowerCase();
+  if (!hay) return null;
+
+  const rules = [
+    ['Fidelity', ['fidelity', 'national financial services', 'nfs']],
+    ['Empower', ['empower', 'great-west', 'great west']],
+    ['Principal', ['principal']],
+    ['Voya', ['voya']],
+    ['John Hancock', ['john hancock']],
+    ['Ascensus', ['ascensus']],
+    ['Schwab', ['schwab', 'td ameritrade']],
+    ['Alight', ['alight']],
+    ['ADP', ['adp']],
+    ['Transamerica', ['transamerica']],
+    ['T. Rowe Price', ['t. rowe', 't rowe', 'trowe']],
+    ['MassMutual', ['massmutual']],
+    ['Prudential', ['prudential']],
+    ['Lincoln', ['lincoln']],
+    ['Paychex', ['paychex']],
+    ['Merrill', ['merrill', 'bank of america']],
+    ['Pershing', ['pershing']]
+  ];
+
+  for (const [label, needles] of rules) {
+    if (needles.some(n => hay.includes(n))) return label;
+  }
+  return null;
+}
+
+function getPlanSegment(participants, assets) {
+  if (participants != null) {
+    if (participants < 25) return 'Micro';
+    if (participants < 100) return 'Small';
+    if (participants < 500) return 'Mid';
+    return 'Large';
+  }
+  if (assets != null) {
+    if (assets < 1000000) return 'Micro';
+    if (assets < 10000000) return 'Small';
+    if (assets < 50000000) return 'Mid';
+    return 'Large';
+  }
+  return null;
+}
+
+function hasFeature(parsed, pattern) {
+  const text = [
+    ...(Array.isArray(parsed?.planFeatures) ? parsed.planFeatures.map(x => `${x?.code || ''} ${x?.description || ''}`) : []),
+    parsed?.notes || ''
+  ].join(' | ').toLowerCase();
+  return pattern.test(text);
+}
+
+function uniqueCompact(items, max) {
+  const seen = new Set();
+  const out = [];
+  for (const item of items || []) {
+    const s = toStringOrNull(item);
+    if (!s) continue;
+    const key = s.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function buildDerivedInsights(parsed) {
+  const assets = parsed?.financials?.totalAssetsEOY ?? null;
+  const participants = parsed?.participants?.withAccountBalances ?? parsed?.participants?.totalEndOfYear ?? parsed?.participants?.activeEndOfYear ?? null;
+  const employer = parsed?.financials?.employerContributions ?? null;
+  const employee = parsed?.financials?.participantContributions ?? null;
+  const totalContrib = parsed?.financials?.totalContributions ?? ((employer || 0) + (employee || 0) || null);
+  const likelyRecordkeeper = inferRecordkeeper(parsed);
+  const planSegment = getPlanSegment(participants, assets);
+  const assetsPerParticipant = (assets != null && participants) ? Math.round(assets / participants) : null;
+  const hasRoth = hasFeature(parsed, /roth/);
+  const hasLoans = (parsed?.financials?.participantLoans || 0) > 0 || hasFeature(parsed, /loan/);
+  const hasMatch = employer != null && employer > 0;
+  const lateContributions = parsed?.compliance?.lateContributions === true;
+  const audited = !!toStringOrNull(parsed?.auditor?.name);
+
+  let prospectScore = 5;
+  if (assets != null) {
+    if (assets >= 25000000) prospectScore += 2;
+    else if (assets >= 5000000) prospectScore += 1;
+    else if (assets < 1000000) prospectScore -= 1;
+  }
+  if (participants != null) {
+    if (participants >= 50) prospectScore += 1;
+    if (participants < 10) prospectScore -= 1;
+  }
+  if (lateContributions) prospectScore += 1;
+  if (!hasRoth) prospectScore += 1;
+  if (!hasLoans) prospectScore += 0.5;
+  if (audited) prospectScore += 0.5;
+  prospectScore = Math.max(1, Math.min(10, Math.round(prospectScore)));
+
+  const watchItems = [];
+  const opportunities = [];
+  const strengths = [];
+  const questionsToAsk = [];
+
+  if (assets != null) strengths.push(`Plan size is meaningful at about $${Math.round(assets).toLocaleString()}.`);
+  if (participants != null) strengths.push(`Participant base appears to be ${participants.toLocaleString()} with balances.`);
+  if (audited) strengths.push('Audited filing usually means cleaner governance and more visible service relationships.');
+  if (likelyRecordkeeper) strengths.push(`Likely recordkeeper appears to be ${likelyRecordkeeper}.`);
+
+  if (lateContributions) watchItems.push('Late contributions were flagged in the filing.');
+  if (parsed?.compliance?.prohibitedTransactions === true) watchItems.push('Prohibited transactions were flagged.');
+  if (parsed?.compliance?.loansInDefault === true) watchItems.push('Participant loans in default were flagged.');
+  if (parsed?.compliance?.failedToPayBenefits === true) watchItems.push('The filing indicates a failure to pay benefits when due.');
+  if (!hasRoth) watchItems.push('No clear Roth feature was identified from the filing.');
+  if (!hasMatch && employee != null && employee > 0) watchItems.push('Employee deferrals are present, but no employer contribution was clearly identified.');
+
+  if (!hasRoth) opportunities.push('Review whether adding or better promoting Roth would improve plan competitiveness.');
+  if (!hasLoans) opportunities.push('Ask whether the plan intentionally excludes loans or if liquidity pressure has shown up through hardship usage instead.');
+  if (likelyRecordkeeper) opportunities.push(`Pressure-test ${likelyRecordkeeper} pricing, participant experience, and managed account/value-add capabilities.`);
+  if (assetsPerParticipant != null && assetsPerParticipant > 100000) opportunities.push('High average balances can justify a fee and investment structure review.');
+  if (lateContributions) opportunities.push('A process/governance conversation could be an easy entry point given the late contribution flag.');
+
+  if (likelyRecordkeeper) questionsToAsk.push(`How satisfied is the committee with ${likelyRecordkeeper} on service, payroll integration, and participant support?`);
+  if (!hasRoth) questionsToAsk.push('Has the sponsor considered Roth, and if not, why?');
+  if (!hasMatch) questionsToAsk.push('Is the current contribution design still helping with retention and participation goals?');
+  if (assetsPerParticipant != null) questionsToAsk.push('Have fees and investment share classes been reviewed recently given current average balances?');
+  if (lateContributions) questionsToAsk.push('What caused the late contribution issue, and has the payroll workflow been fixed?');
+
+  return {
+    likelyRecordkeeper,
+    planSegment,
+    assetsPerParticipant,
+    hasRoth,
+    hasLoans,
+    hasMatch,
+    prospectScore,
+    strengths: uniqueCompact(strengths, 5),
+    watchItems: uniqueCompact(watchItems, 6),
+    opportunities: uniqueCompact(opportunities, 6),
+    questionsToAsk: uniqueCompact(questionsToAsk, 6)
+  };
+}
+
 function normalizeCoreParsed(r) {
   return normalizeParsed({
     planName: r?.planName ?? null,
@@ -332,10 +491,12 @@ function normalizeCoreParsed(r) {
 function normalizeInsights(r) {
   return {
     summary: toStringOrNull(r?.summary),
-    strengths: limitArray(r?.strengths, 5).map(x => toStringOrNull(x)).filter(Boolean),
-    watchItems: limitArray(r?.watchItems, 5).map(x => toStringOrNull(x)).filter(Boolean),
-    opportunities: limitArray(r?.opportunities, 5).map(x => toStringOrNull(x)).filter(Boolean),
-    questionsToAsk: limitArray(r?.questionsToAsk, 5).map(x => toStringOrNull(x)).filter(Boolean),
+    score: toNumberOrNull(r?.score),
+    strengths: limitArray(r?.strengths, 6).map(x => toStringOrNull(x)).filter(Boolean),
+    watchItems: limitArray(r?.watchItems, 6).map(x => toStringOrNull(x)).filter(Boolean),
+    opportunities: limitArray(r?.opportunities, 6).map(x => toStringOrNull(x)).filter(Boolean),
+    questionsToAsk: limitArray(r?.questionsToAsk, 6).map(x => toStringOrNull(x)).filter(Boolean),
+    pitchAngle: toStringOrNull(r?.pitchAngle),
     humanTake: toStringOrNull(r?.humanTake),
     confidence: toStringOrNull(r?.confidence)
   };
@@ -406,10 +567,13 @@ async function parseResponseWithRepair(rawText, apiKey) {
   }
 }
 
-async function generateInsights(parsed, apiKey, partial) {
+async function generateInsights(parsed, apiKey, partial, derived) {
   const prompt = `Review this structured Form 5500 plan data and return advisor-style insights in the required JSON format.
 
 Partial extraction: ${partial ? 'yes' : 'no'}
+
+DERIVED SIGNALS:
+${JSON.stringify(derived)}
 
 PLAN DATA:
 ${JSON.stringify(parsed)}`;
@@ -488,11 +652,31 @@ Be concise and accurate.`;
     // Keep reliable core extraction
   }
 
+  const derived = buildDerivedInsights(finalParsed);
+
   let insights = null;
   try {
-    insights = await generateInsights(finalParsed, apiKey, partial);
+    insights = await generateInsights(finalParsed, apiKey, partial, derived);
+    insights = {
+      ...insights,
+      score: insights?.score ?? derived.prospectScore,
+      strengths: uniqueCompact([...(derived.strengths || []), ...((insights && insights.strengths) || [])], 6),
+      watchItems: uniqueCompact([...(derived.watchItems || []), ...((insights && insights.watchItems) || [])], 6),
+      opportunities: uniqueCompact([...(derived.opportunities || []), ...((insights && insights.opportunities) || [])], 6),
+      questionsToAsk: uniqueCompact([...(derived.questionsToAsk || []), ...((insights && insights.questionsToAsk) || [])], 6)
+    };
   } catch {
-    insights = null;
+    insights = {
+      summary: null,
+      score: derived.prospectScore,
+      strengths: derived.strengths,
+      watchItems: derived.watchItems,
+      opportunities: derived.opportunities,
+      questionsToAsk: derived.questionsToAsk,
+      pitchAngle: null,
+      humanTake: null,
+      confidence: partial ? 'medium' : 'high'
+    };
   }
 
   return {
@@ -500,7 +684,8 @@ Be concise and accurate.`;
     rawText,
     partial,
     repaired,
-    insights
+    insights,
+    derived
   };
 }
 
@@ -510,7 +695,12 @@ exports.handler = async function(event) {
   if (!process.env.ANTHROPIC_API_KEY) return jsonResponse(500, { ok: false, error: 'Missing ANTHROPIC_API_KEY environment variable in Netlify.' });
 
   try {
-    const body = JSON.parse(event.body || '{}');
+    let body;
+    try {
+      body = JSON.parse(event.body || '{}');
+    } catch {
+      return jsonResponse(400, { ok: false, error: 'Request body must be valid JSON.' });
+    }
 
     if (body.mode === 'extract_5500') {
       if (!body.base64) return jsonResponse(400, { ok: false, error: 'Missing base64 PDF payload.' });
@@ -522,7 +712,8 @@ exports.handler = async function(event) {
           parsed: result.parsed,
           partial: !!result.partial,
           repaired: !!result.repaired,
-          insights: result.insights || null
+          insights: result.insights || null,
+          derived: result.derived || null
         });
       } catch (err) {
         return jsonResponse(422, {
