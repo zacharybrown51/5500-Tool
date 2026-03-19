@@ -9,21 +9,21 @@ const CORS_HEADERS = {
 
 const EXTRACTION_SYSTEM_PROMPT = `You are a Form 5500 retirement plan filing analyst.
 
-Your job is to extract useful retirement-plan data from a Form 5500 PDF into one valid JSON object.
+Extract useful retirement-plan data from a Form 5500 PDF into one valid JSON object.
 
 Rules:
-- Return exactly one valid JSON object.
-- No markdown fences.
-- No commentary.
-- No trailing commas.
-- If a field is not found, use null.
+- Return exactly one valid JSON object
+- No markdown
+- No commentary
+- No trailing commas
+- If a field is not found, use null
+- Prefer accuracy over completeness
+- Do not invent values
 - Keep arrays concise:
-  - investments: include up to 20 of the largest or most clearly identified holdings
+  - investments: include up to 20 clearly identified holdings
   - serviceProviders: include up to 15 clearly identified providers
   - assetAllocation: include clearly stated categories only
   - planFeatures: include only clearly inferable features/codes
-- Prefer accuracy over completeness.
-- Do not invent values.
 
 Return this exact JSON shape:
 {
@@ -82,65 +82,19 @@ Return this exact JSON shape:
   "notes": string|null
 }`;
 
-const CORE_EXTRACTION_PROMPT = `Extract ONLY the core plan data from this Form 5500.
-Return exactly one valid JSON object and nothing else.
-No markdown.
-No explanation.
-
-Use this exact shape:
-{
-  "planName": string|null,
-  "sponsor": string|null,
-  "ein": string|null,
-  "planNumber": string|null,
-  "planYear": string|null,
-  "participants": {
-    "totalEndOfYear": number|null,
-    "withAccountBalances": number|null
-  },
-  "financials": {
-    "totalAssetsEOY": number|null,
-    "participantContributions": number|null,
-    "employerContributions": number|null
-  },
-  "serviceProviders": [{"name": string, "role": string|null}],
-  "notes": string|null
-}`;
-
-const INSIGHT_SYSTEM_PROMPT = `You are an experienced retirement plan advisor reviewing a Form 5500 analysis.
-
-Given structured plan data, produce concise but thoughtful practical feedback in JSON.
-
-Rules:
-- Return exactly one valid JSON object.
-- No markdown.
-- No commentary outside the JSON.
-- Be analytical and useful, not hypey.
-- Base comments on the data provided. If uncertain, say so briefly.
-- Keep each bullet short and practical.
-- Use the plan data rather than generic retirement-plan advice.
-
-Return this exact shape:
-{
-  "summary": string|null,
-  "score": number|null,
-  "strengths": [string],
-  "watchItems": [string],
-  "opportunities": [string],
-  "questionsToAsk": [string],
-  "pitchAngle": string|null,
-  "humanTake": string|null,
-  "confidence": string|null
-}`;
-
 function jsonResponse(statusCode, body) {
-  return { statusCode, headers: CORS_HEADERS, body: JSON.stringify(body) };
+  return {
+    statusCode,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(body)
+  };
 }
 
 function extractTextFromAnthropicResponse(data) {
   let text = '';
-  const blocks = Array.isArray(data?.content) ? data.content : [];
-  for (const block of blocks) {
+  const blocks = Array.isArray(data && data.content) ? data.content : [];
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
     if (block && block.type === 'text' && typeof block.text === 'string') {
       text += block.text;
     }
@@ -150,7 +104,7 @@ function extractTextFromAnthropicResponse(data) {
 
 function extractBalancedJSONObject(str) {
   const start = str.indexOf('{');
-  if (start === -1) throw new Error('No JSON object found in model response');
+  if (start === -1) throw new Error('No JSON object found in model response.');
 
   let depth = 0;
   let inString = false;
@@ -158,21 +112,30 @@ function extractBalancedJSONObject(str) {
 
   for (let i = start; i < str.length; i++) {
     const ch = str[i];
+
     if (inString) {
-      if (escape) escape = false;
-      else if (ch === '\\') escape = true;
-      else if (ch === '"') inString = false;
+      if (escape) {
+        escape = false;
+      } else if (ch === '\\') {
+        escape = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
     } else {
-      if (ch === '"') inString = true;
-      else if (ch === '{') depth++;
-      else if (ch === '}') {
+      if (ch === '"') {
+        inString = true;
+      } else if (ch === '{') {
+        depth++;
+      } else if (ch === '}') {
         depth--;
-        if (depth === 0) return str.slice(start, i + 1);
+        if (depth === 0) {
+          return str.slice(start, i + 1);
+        }
       }
     }
   }
 
-  throw new Error('No complete JSON object found in model response');
+  throw new Error('No complete JSON object found in model response.');
 }
 
 function cleanCandidateJSON(str) {
@@ -187,37 +150,42 @@ function cleanCandidateJSON(str) {
 }
 
 function parseMaybeJSON(rawText) {
-  const cleanedText = cleanCandidateJSON(rawText);
-  const candidate = extractBalancedJSONObject(cleanedText);
+  const cleaned = cleanCandidateJSON(rawText);
+  const candidate = extractBalancedJSONObject(cleaned);
   return JSON.parse(candidate);
 }
 
 function toNumberOrNull(v) {
   if (v === null || v === undefined || v === '') return null;
   if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+
   const raw = String(v).trim();
   if (!raw) return null;
+
   const negative = /^\(.*\)$/.test(raw);
   const stripped = raw.replace(/[\$,%\s,()]/g, '').trim();
   if (!stripped) return null;
+
   const num = Number(stripped);
   if (!Number.isFinite(num)) return null;
+
   return negative ? -num : num;
 }
 
 function toBoolOrNull(v) {
   if (v === null || v === undefined || v === '') return null;
   if (typeof v === 'boolean') return v;
+
   const s = String(v).trim().toLowerCase();
-  if (['true', 'yes', 'y', '1'].includes(s)) return true;
-  if (['false', 'no', 'n', '0'].includes(s)) return false;
+  if (s === 'true' || s === 'yes' || s === 'y' || s === '1') return true;
+  if (s === 'false' || s === 'no' || s === 'n' || s === '0') return false;
   return null;
 }
 
 function toStringOrNull(v) {
   if (v === null || v === undefined) return null;
   const s = String(v).trim();
-  return s ? s : null;
+  return s || null;
 }
 
 function limitArray(arr, max) {
@@ -225,20 +193,20 @@ function limitArray(arr, max) {
 }
 
 function normalizeParsed(r) {
-  const participants = r?.participants || {};
-  const financials = r?.financials || {};
-  const compliance = r?.compliance || {};
-  const auditor = r?.auditor || {};
-  const fundingInfo = r?.fundingInfo || {};
+  const participants = r && r.participants ? r.participants : {};
+  const financials = r && r.financials ? r.financials : {};
+  const compliance = r && r.compliance ? r.compliance : {};
+  const auditor = r && r.auditor ? r.auditor : {};
+  const fundingInfo = r && r.fundingInfo ? r.fundingInfo : {};
 
   return {
-    planName: toStringOrNull(r?.planName),
-    sponsor: toStringOrNull(r?.sponsor),
-    ein: toStringOrNull(r?.ein)?.replace(/[^\d-]/g, '') || null,
-    planNumber: toStringOrNull(r?.planNumber),
-    planYear: toStringOrNull(r?.planYear),
-    planType: toStringOrNull(r?.planType),
-    filingType: toStringOrNull(r?.filingType),
+    planName: toStringOrNull(r && r.planName),
+    sponsor: toStringOrNull(r && r.sponsor),
+    ein: toStringOrNull(r && r.ein) ? toStringOrNull(r.ein).replace(/[^\d-]/g, '') : null,
+    planNumber: toStringOrNull(r && r.planNumber),
+    planYear: toStringOrNull(r && r.planYear),
+    planType: toStringOrNull(r && r.planType),
+    filingType: toStringOrNull(r && r.filingType),
     participants: {
       beginningOfYear: toNumberOrNull(participants.beginningOfYear),
       activeEndOfYear: toNumberOrNull(participants.activeEndOfYear),
@@ -266,29 +234,39 @@ function normalizeParsed(r) {
       participantLoans: toNumberOrNull(financials.participantLoans),
       employerSecurities: toNumberOrNull(financials.employerSecurities)
     },
-    assetAllocation: limitArray(r?.assetAllocation, 20).map(x => ({
-      category: toStringOrNull(x?.category) || 'Unspecified',
-      beginningValue: toNumberOrNull(x?.beginningValue),
-      endValue: toNumberOrNull(x?.endValue)
-    })),
-    investments: limitArray(r?.investments, 20).map(x => ({
-      name: toStringOrNull(x?.name) || 'Unnamed investment',
-      value: toNumberOrNull(x?.value),
-      type: toStringOrNull(x?.type)
-    })),
-    serviceProviders: limitArray(r?.serviceProviders, 15).map(x => ({
-      name: toStringOrNull(x?.name) || 'Unnamed provider',
-      ein: toStringOrNull(x?.ein),
-      role: toStringOrNull(x?.role),
-      serviceCodes: toStringOrNull(x?.serviceCodes),
-      directCompensation: toNumberOrNull(x?.directCompensation),
-      indirectCompensation: toNumberOrNull(x?.indirectCompensation),
-      relationship: toStringOrNull(x?.relationship)
-    })),
-    planFeatures: limitArray(r?.planFeatures, 20).map(x => ({
-      code: toStringOrNull(x?.code) || '',
-      description: toStringOrNull(x?.description) || ''
-    })).filter(x => x.code || x.description),
+    assetAllocation: limitArray(r && r.assetAllocation, 20).map(function(x) {
+      return {
+        category: toStringOrNull(x && x.category) || 'Unspecified',
+        beginningValue: toNumberOrNull(x && x.beginningValue),
+        endValue: toNumberOrNull(x && x.endValue)
+      };
+    }),
+    investments: limitArray(r && r.investments, 20).map(function(x) {
+      return {
+        name: toStringOrNull(x && x.name) || 'Unnamed investment',
+        value: toNumberOrNull(x && x.value),
+        type: toStringOrNull(x && x.type)
+      };
+    }),
+    serviceProviders: limitArray(r && r.serviceProviders, 15).map(function(x) {
+      return {
+        name: toStringOrNull(x && x.name) || 'Unnamed provider',
+        ein: toStringOrNull(x && x.ein),
+        role: toStringOrNull(x && x.role),
+        serviceCodes: toStringOrNull(x && x.serviceCodes),
+        directCompensation: toNumberOrNull(x && x.directCompensation),
+        indirectCompensation: toNumberOrNull(x && x.indirectCompensation),
+        relationship: toStringOrNull(x && x.relationship)
+      };
+    }),
+    planFeatures: limitArray(r && r.planFeatures, 20).map(function(x) {
+      return {
+        code: toStringOrNull(x && x.code) || '',
+        description: toStringOrNull(x && x.description) || ''
+      };
+    }).filter(function(x) {
+      return x.code || x.description;
+    }),
     compliance: {
       lateContributions: toBoolOrNull(compliance.lateContributions),
       lateContributionAmount: toNumberOrNull(compliance.lateContributionAmount),
@@ -311,202 +289,123 @@ function normalizeParsed(r) {
       actualContribution: toNumberOrNull(fundingInfo.actualContribution),
       fundingShortfall: toNumberOrNull(fundingInfo.fundingShortfall)
     },
-    notes: toStringOrNull(r?.notes)
+    notes: toStringOrNull(r && r.notes)
   };
 }
 
 function inferRecordkeeper(parsed) {
   const names = [];
-  if (Array.isArray(parsed?.serviceProviders)) {
-    for (const sp of parsed.serviceProviders) {
-      if (sp?.name) names.push(String(sp.name));
-      if (sp?.role) names.push(String(sp.role));
-    }
+  const providers = Array.isArray(parsed && parsed.serviceProviders) ? parsed.serviceProviders : [];
+
+  for (let i = 0; i < providers.length; i++) {
+    if (providers[i] && providers[i].name) names.push(String(providers[i].name));
+    if (providers[i] && providers[i].role) names.push(String(providers[i].role));
   }
-  if (parsed?.auditor?.name) names.push(String(parsed.auditor.name));
+
   const hay = names.join(' | ').toLowerCase();
   if (!hay) return null;
 
-  const rules = [
-    ['Fidelity', ['fidelity', 'national financial services', 'nfs']],
-    ['Empower', ['empower', 'great-west', 'great west']],
-    ['Principal', ['principal']],
-    ['Voya', ['voya']],
-    ['John Hancock', ['john hancock']],
-    ['Ascensus', ['ascensus']],
-    ['Schwab', ['schwab', 'td ameritrade']],
-    ['Alight', ['alight']],
-    ['ADP', ['adp']],
-    ['Transamerica', ['transamerica']],
-    ['T. Rowe Price', ['t. rowe', 't rowe', 'trowe']],
-    ['MassMutual', ['massmutual']],
-    ['Prudential', ['prudential']],
-    ['Lincoln', ['lincoln']],
-    ['Paychex', ['paychex']],
-    ['Merrill', ['merrill', 'bank of america']],
-    ['Pershing', ['pershing']]
-  ];
+  if (hay.indexOf('fidelity') >= 0 || hay.indexOf('national financial services') >= 0 || hay.indexOf('nfs') >= 0) return 'Fidelity';
+  if (hay.indexOf('empower') >= 0 || hay.indexOf('great-west') >= 0 || hay.indexOf('great west') >= 0) return 'Empower';
+  if (hay.indexOf('principal') >= 0) return 'Principal';
+  if (hay.indexOf('voya') >= 0) return 'Voya';
+  if (hay.indexOf('john hancock') >= 0) return 'John Hancock';
+  if (hay.indexOf('ascensus') >= 0) return 'Ascensus';
+  if (hay.indexOf('schwab') >= 0 || hay.indexOf('td ameritrade') >= 0) return 'Schwab';
+  if (hay.indexOf('alight') >= 0) return 'Alight';
+  if (hay.indexOf('adp') >= 0) return 'ADP';
+  if (hay.indexOf('transamerica') >= 0) return 'Transamerica';
+  if (hay.indexOf('lincoln') >= 0) return 'Lincoln';
+  if (hay.indexOf('paychex') >= 0) return 'Paychex';
+  if (hay.indexOf('merrill') >= 0 || hay.indexOf('bank of america') >= 0) return 'Merrill';
+  if (hay.indexOf('pershing') >= 0) return 'Pershing';
 
-  for (const [label, needles] of rules) {
-    if (needles.some(n => hay.includes(n))) return label;
-  }
-  return null;
-}
-
-function getPlanSegment(participants, assets) {
-  if (participants != null) {
-    if (participants < 25) return 'Micro';
-    if (participants < 100) return 'Small';
-    if (participants < 500) return 'Mid';
-    return 'Large';
-  }
-  if (assets != null) {
-    if (assets < 1000000) return 'Micro';
-    if (assets < 10000000) return 'Small';
-    if (assets < 50000000) return 'Mid';
-    return 'Large';
-  }
   return null;
 }
 
 function hasFeature(parsed, pattern) {
-  const text = [
-    ...(Array.isArray(parsed?.planFeatures) ? parsed.planFeatures.map(x => `${x?.code || ''} ${x?.description || ''}`) : []),
-    parsed?.notes || ''
-  ].join(' | ').toLowerCase();
-  return pattern.test(text);
-}
+  const featureText = [];
+  const features = Array.isArray(parsed && parsed.planFeatures) ? parsed.planFeatures : [];
 
-function uniqueCompact(items, max) {
-  const seen = new Set();
-  const out = [];
-  for (const item of items || []) {
-    const s = toStringOrNull(item);
-    if (!s) continue;
-    const key = s.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(s);
-    if (out.length >= max) break;
+  for (let i = 0; i < features.length; i++) {
+    featureText.push((features[i].code || '') + ' ' + (features[i].description || ''));
   }
-  return out;
+
+  if (parsed && parsed.notes) featureText.push(parsed.notes);
+
+  return pattern.test(featureText.join(' | ').toLowerCase());
 }
 
 function buildDerivedInsights(parsed) {
-  const assets = parsed?.financials?.totalAssetsEOY ?? null;
-  const participants = parsed?.participants?.withAccountBalances ?? parsed?.participants?.totalEndOfYear ?? parsed?.participants?.activeEndOfYear ?? null;
-  const employer = parsed?.financials?.employerContributions ?? null;
-  const employee = parsed?.financials?.participantContributions ?? null;
-  const totalContrib = parsed?.financials?.totalContributions ?? ((employer || 0) + (employee || 0) || null);
+  const assets = parsed && parsed.financials ? parsed.financials.totalAssetsEOY : null;
+  const participants = parsed && parsed.participants
+    ? (parsed.participants.withAccountBalances != null
+      ? parsed.participants.withAccountBalances
+      : (parsed.participants.totalEndOfYear != null
+        ? parsed.participants.totalEndOfYear
+        : parsed.participants.activeEndOfYear))
+    : null;
+
+  const employer = parsed && parsed.financials ? parsed.financials.employerContributions : null;
   const likelyRecordkeeper = inferRecordkeeper(parsed);
-  const planSegment = getPlanSegment(participants, assets);
-  const assetsPerParticipant = (assets != null && participants) ? Math.round(assets / participants) : null;
   const hasRoth = hasFeature(parsed, /roth/);
-  const hasLoans = (parsed?.financials?.participantLoans || 0) > 0 || hasFeature(parsed, /loan/);
+  const hasLoans = ((parsed && parsed.financials && parsed.financials.participantLoans) || 0) > 0 || hasFeature(parsed, /loan/);
   const hasMatch = employer != null && employer > 0;
-  const lateContributions = parsed?.compliance?.lateContributions === true;
-  const audited = !!toStringOrNull(parsed?.auditor?.name);
+  const lateContributions = !!(parsed && parsed.compliance && parsed.compliance.lateContributions);
+  const assetsPerParticipant = (assets != null && participants) ? Math.round(assets / participants) : null;
 
   let prospectScore = 5;
+
   if (assets != null) {
     if (assets >= 25000000) prospectScore += 2;
     else if (assets >= 5000000) prospectScore += 1;
     else if (assets < 1000000) prospectScore -= 1;
   }
+
   if (participants != null) {
     if (participants >= 50) prospectScore += 1;
     if (participants < 10) prospectScore -= 1;
   }
+
   if (lateContributions) prospectScore += 1;
   if (!hasRoth) prospectScore += 1;
-  if (!hasLoans) prospectScore += 0.5;
-  if (audited) prospectScore += 0.5;
+
   prospectScore = Math.max(1, Math.min(10, Math.round(prospectScore)));
 
   const watchItems = [];
   const opportunities = [];
-  const strengths = [];
   const questionsToAsk = [];
 
-  if (assets != null) strengths.push(`Plan size is meaningful at about $${Math.round(assets).toLocaleString()}.`);
-  if (participants != null) strengths.push(`Participant base appears to be ${participants.toLocaleString()} with balances.`);
-  if (audited) strengths.push('Audited filing usually means cleaner governance and more visible service relationships.');
-  if (likelyRecordkeeper) strengths.push(`Likely recordkeeper appears to be ${likelyRecordkeeper}.`);
-
   if (lateContributions) watchItems.push('Late contributions were flagged in the filing.');
-  if (parsed?.compliance?.prohibitedTransactions === true) watchItems.push('Prohibited transactions were flagged.');
-  if (parsed?.compliance?.loansInDefault === true) watchItems.push('Participant loans in default were flagged.');
-  if (parsed?.compliance?.failedToPayBenefits === true) watchItems.push('The filing indicates a failure to pay benefits when due.');
-  if (!hasRoth) watchItems.push('No clear Roth feature was identified from the filing.');
-  if (!hasMatch && employee != null && employee > 0) watchItems.push('Employee deferrals are present, but no employer contribution was clearly identified.');
+  if (!hasRoth) watchItems.push('No clear Roth feature was identified.');
+  if (!hasMatch) watchItems.push('No employer contribution was clearly identified.');
+  if (parsed && parsed.compliance && parsed.compliance.prohibitedTransactions === true) {
+    watchItems.push('Prohibited transactions were flagged.');
+  }
 
-  if (!hasRoth) opportunities.push('Review whether adding or better promoting Roth would improve plan competitiveness.');
-  if (!hasLoans) opportunities.push('Ask whether the plan intentionally excludes loans or if liquidity pressure has shown up through hardship usage instead.');
-  if (likelyRecordkeeper) opportunities.push(`Pressure-test ${likelyRecordkeeper} pricing, participant experience, and managed account/value-add capabilities.`);
-  if (assetsPerParticipant != null && assetsPerParticipant > 100000) opportunities.push('High average balances can justify a fee and investment structure review.');
-  if (lateContributions) opportunities.push('A process/governance conversation could be an easy entry point given the late contribution flag.');
+  if (!hasRoth) opportunities.push('Roth availability or participant communication may be a plan improvement opportunity.');
+  if (!hasLoans) opportunities.push('Ask whether loans are intentionally excluded and whether liquidity issues show up elsewhere.');
+  if (likelyRecordkeeper) opportunities.push('Benchmark ' + likelyRecordkeeper + ' on pricing, support, and participant experience.');
+  if (assetsPerParticipant != null && assetsPerParticipant > 100000) {
+    opportunities.push('Average balances are high enough to justify a fee and investment review.');
+  }
 
-  if (likelyRecordkeeper) questionsToAsk.push(`How satisfied is the committee with ${likelyRecordkeeper} on service, payroll integration, and participant support?`);
-  if (!hasRoth) questionsToAsk.push('Has the sponsor considered Roth, and if not, why?');
-  if (!hasMatch) questionsToAsk.push('Is the current contribution design still helping with retention and participation goals?');
-  if (assetsPerParticipant != null) questionsToAsk.push('Have fees and investment share classes been reviewed recently given current average balances?');
-  if (lateContributions) questionsToAsk.push('What caused the late contribution issue, and has the payroll workflow been fixed?');
+  if (likelyRecordkeeper) questionsToAsk.push('How satisfied is the sponsor with ' + likelyRecordkeeper + '?');
+  if (!hasRoth) questionsToAsk.push('Has the sponsor considered adding or better promoting Roth?');
+  if (!hasMatch) questionsToAsk.push('Is the current employer contribution design still competitive?');
+  if (lateContributions) questionsToAsk.push('What caused the late contribution issue and has it been fixed?');
 
   return {
-    likelyRecordkeeper,
-    planSegment,
-    assetsPerParticipant,
-    hasRoth,
-    hasLoans,
-    hasMatch,
-    prospectScore,
-    strengths: uniqueCompact(strengths, 5),
-    watchItems: uniqueCompact(watchItems, 6),
-    opportunities: uniqueCompact(opportunities, 6),
-    questionsToAsk: uniqueCompact(questionsToAsk, 6)
+    likelyRecordkeeper: likelyRecordkeeper,
+    assetsPerParticipant: assetsPerParticipant,
+    hasRoth: hasRoth,
+    hasLoans: hasLoans,
+    hasMatch: hasMatch,
+    prospectScore: prospectScore,
+    watchItems: watchItems,
+    opportunities: opportunities,
+    questionsToAsk: questionsToAsk
   };
-}
-
-function normalizeCoreParsed(r) {
-  return normalizeParsed({
-    planName: r?.planName ?? null,
-    sponsor: r?.sponsor ?? null,
-    ein: r?.ein ?? null,
-    planNumber: r?.planNumber ?? null,
-    planYear: r?.planYear ?? null,
-    participants: {
-      totalEndOfYear: r?.participants?.totalEndOfYear ?? null,
-      withAccountBalances: r?.participants?.withAccountBalances ?? null
-    },
-    financials: {
-      totalAssetsEOY: r?.financials?.totalAssetsEOY ?? null,
-      participantContributions: r?.financials?.participantContributions ?? null,
-      employerContributions: r?.financials?.employerContributions ?? null
-    },
-    serviceProviders: Array.isArray(r?.serviceProviders) ? r.serviceProviders : [],
-    notes: r?.notes ?? null
-  });
-}
-
-function normalizeInsights(r) {
-  return {
-    summary: toStringOrNull(r?.summary),
-    score: toNumberOrNull(r?.score),
-    strengths: limitArray(r?.strengths, 6).map(x => toStringOrNull(x)).filter(Boolean),
-    watchItems: limitArray(r?.watchItems, 6).map(x => toStringOrNull(x)).filter(Boolean),
-    opportunities: limitArray(r?.opportunities, 6).map(x => toStringOrNull(x)).filter(Boolean),
-    questionsToAsk: limitArray(r?.questionsToAsk, 6).map(x => toStringOrNull(x)).filter(Boolean),
-    pitchAngle: toStringOrNull(r?.pitchAngle),
-    humanTake: toStringOrNull(r?.humanTake),
-    confidence: toStringOrNull(r?.confidence)
-  };
-}
-
-function looksTruncated(rawText) {
-  const t = cleanCandidateJSON(rawText);
-  const openBraces = (t.match(/{/g) || []).length;
-  const closeBraces = (t.match(/}/g) || []).length;
-  return closeBraces < openBraces;
 }
 
 async function callAnthropic(payload, apiKey) {
@@ -521,227 +420,101 @@ async function callAnthropic(payload, apiKey) {
   });
 
   const text = await resp.text();
+
   let data = null;
-  try { data = JSON.parse(text); } catch {}
+  try {
+    data = JSON.parse(text);
+  } catch (e) {
+    data = null;
+  }
 
   if (!resp.ok) {
-    throw new Error(data?.error?.message || data?.error || text || `Anthropic error ${resp.status}`);
+    throw new Error((data && data.error && data.error.message) || text || ('Anthropic error ' + resp.status));
+  }
+
+  if (!data || !Array.isArray(data.content)) {
+    throw new Error('Anthropic returned an unexpected response shape.');
   }
 
   return data;
 }
 
-async function repairJsonWithClaude(rawText, apiKey) {
-  const repairPrompt = `Convert the following malformed or noisy model output into exactly one valid JSON object.
-Return only JSON.
-Do not add commentary.
-Preserve information when possible.
-If the content is obviously truncated and cannot be repaired confidently, return:
-{"_repair_error":"truncated_or_unrepairable","raw_excerpt":"..."}
-
-MODEL OUTPUT TO REPAIR:
-${rawText}`;
-
-  const data = await callAnthropic({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 2500,
-    temperature: 0,
-    messages: [{ role: 'user', content: [{ type: 'text', text: repairPrompt }] }]
-  }, apiKey);
-
-  return extractTextFromAnthropicResponse(data);
-}
-
-async function parseResponseWithRepair(rawText, apiKey) {
-  try {
-    return { parsed: parseMaybeJSON(rawText), repaired: false };
-  } catch {
-    const repairedRaw = await repairJsonWithClaude(rawText, apiKey);
-    const repairedParsed = parseMaybeJSON(repairedRaw);
-    if (repairedParsed && repairedParsed._repair_error) {
-      const err = new Error('The model returned incomplete or unrepairable JSON.');
-      err.rawText = rawText;
-      throw err;
-    }
-    return { parsed: repairedParsed, repaired: true, repairedRaw };
-  }
-}
-
-async function generateInsights(parsed, apiKey, partial, derived) {
-  const prompt = `Review this structured Form 5500 plan data and return advisor-style insights in the required JSON format.
-
-Partial extraction: ${partial ? 'yes' : 'no'}
-
-DERIVED SIGNALS:
-${JSON.stringify(derived)}
-
-PLAN DATA:
-${JSON.stringify(parsed)}`;
-
-  const insightResponse = await callAnthropic({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 1800,
-    temperature: 0.2,
-    system: INSIGHT_SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }]
-  }, apiKey);
-
-  const rawText = extractTextFromAnthropicResponse(insightResponse);
-  const parsedInsight = await parseResponseWithRepair(rawText, apiKey);
-  return normalizeInsights(parsedInsight.parsed);
-}
-
-async function extract5500(base64, fileName, apiKey) {
-  const corePass = await callAnthropic({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 1800,
-    temperature: 0,
-    messages: [{
-      role: 'user',
-      content: [
-        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } },
-        { type: 'text', text: CORE_EXTRACTION_PROMPT }
-      ]
-    }]
-  }, apiKey);
-
-  const coreRawText = extractTextFromAnthropicResponse(corePass);
-  const coreResult = await parseResponseWithRepair(coreRawText, apiKey);
-  const coreParsed = normalizeCoreParsed(coreResult.parsed);
-
-  if (!coreParsed.planName && !coreParsed.ein && !coreParsed.financials.totalAssetsEOY) {
-    const err = new Error('Core extraction failed.');
-    err.rawText = coreRawText;
-    throw err;
-  }
-
-  const userPrompt = `Analyze this Form 5500 filing and return exactly one valid JSON object using the required schema.
-No markdown.
-No explanation.
-If a field is not present, use null.
-Be concise and accurate.`;
-
-  let finalParsed = coreParsed;
-  let partial = true;
-  let repaired = !!coreResult.repaired;
-  let rawText = coreRawText;
-
-  try {
-    const fullPass = await callAnthropic({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 3400,
-      temperature: 0,
-      system: EXTRACTION_SYSTEM_PROMPT,
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } },
-          { type: 'text', text: userPrompt }
-        ]
-      }]
-    }, apiKey);
-
-    const fullRawText = extractTextFromAnthropicResponse(fullPass);
-    const fullResult = await parseResponseWithRepair(fullRawText, apiKey);
-
-    finalParsed = normalizeParsed(fullResult.parsed);
-    partial = false;
-    repaired = !!fullResult.repaired;
-    rawText = fullRawText;
-  } catch {
-    // Keep reliable core extraction
-  }
-
-  const derived = buildDerivedInsights(finalParsed);
-
-  let insights = null;
-  try {
-    insights = await generateInsights(finalParsed, apiKey, partial, derived);
-    insights = {
-      ...insights,
-      score: insights?.score ?? derived.prospectScore,
-      strengths: uniqueCompact([...(derived.strengths || []), ...((insights && insights.strengths) || [])], 6),
-      watchItems: uniqueCompact([...(derived.watchItems || []), ...((insights && insights.watchItems) || [])], 6),
-      opportunities: uniqueCompact([...(derived.opportunities || []), ...((insights && insights.opportunities) || [])], 6),
-      questionsToAsk: uniqueCompact([...(derived.questionsToAsk || []), ...((insights && insights.questionsToAsk) || [])], 6)
-    };
-  } catch {
-    insights = {
-      summary: null,
-      score: derived.prospectScore,
-      strengths: derived.strengths,
-      watchItems: derived.watchItems,
-      opportunities: derived.opportunities,
-      questionsToAsk: derived.questionsToAsk,
-      pitchAngle: null,
-      humanTake: null,
-      confidence: partial ? 'medium' : 'high'
-    };
-  }
-
-  return {
-    parsed: finalParsed,
-    rawText,
-    partial,
-    repaired,
-    insights,
-    derived
-  };
-}
-
 exports.handler = async function(event) {
-  if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers: CORS_HEADERS, body: '' };
-  if (event.httpMethod !== 'POST') return jsonResponse(405, { ok: false, error: 'Method not allowed' });
-  if (!process.env.ANTHROPIC_API_KEY) return jsonResponse(500, { ok: false, error: 'Missing ANTHROPIC_API_KEY environment variable in Netlify.' });
+  if (event.httpMethod === 'OPTIONS') {
+    return { statusCode: 200, headers: CORS_HEADERS, body: '' };
+  }
+
+  if (event.httpMethod !== 'POST') {
+    return jsonResponse(405, { ok: false, error: 'Method not allowed.' });
+  }
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return jsonResponse(500, { ok: false, error: 'Missing ANTHROPIC_API_KEY environment variable in Netlify.' });
+  }
 
   try {
     let body;
     try {
       body = JSON.parse(event.body || '{}');
-    } catch {
+    } catch (e) {
       return jsonResponse(400, { ok: false, error: 'Request body must be valid JSON.' });
     }
 
-    if (body.mode === 'extract_5500') {
-      if (!body.base64) return jsonResponse(400, { ok: false, error: 'Missing base64 PDF payload.' });
-
-      try {
-        const result = await extract5500(body.base64, body.fileName || null, process.env.ANTHROPIC_API_KEY);
-        return jsonResponse(200, {
-          ok: true,
-          parsed: result.parsed,
-          partial: !!result.partial,
-          repaired: !!result.repaired,
-          insights: result.insights || null,
-          derived: result.derived || null
-        });
-      } catch (err) {
-        return jsonResponse(422, {
-          ok: false,
-          error: err.message || 'Could not extract structured JSON from filing.',
-          rawText: typeof err.rawText === 'string' ? err.rawText.slice(0, 4000) : undefined,
-          details: (err && err.details) ? err.details : (looksTruncated(err.rawText || '') ? 'Model output appears truncated.' : undefined)
-        });
-      }
+    if (body.mode !== 'extract_5500') {
+      return jsonResponse(400, { ok: false, error: 'Unsupported mode.' });
     }
 
-    const resp = await fetch(API_URL, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify(body)
-    });
+    if (!body.base64 || typeof body.base64 !== 'string') {
+      return jsonResponse(400, { ok: false, error: 'Missing base64 PDF payload.' });
+    }
 
-    const text = await resp.text();
-    return { statusCode: resp.status, headers: CORS_HEADERS, body: text };
+    if (body.base64.length > 7000000) {
+      return jsonResponse(413, {
+        ok: false,
+        error: 'This PDF is too large for the current Netlify function setup. Try a smaller filing or compress the PDF first.'
+      });
+    }
+
+    const response = await callAnthropic({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 2600,
+      temperature: 0,
+      system: EXTRACTION_SYSTEM_PROMPT,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: 'document',
+            source: {
+              type: 'base64',
+              media_type: 'application/pdf',
+              data: body.base64
+            }
+          },
+          {
+            type: 'text',
+            text: 'Analyze this Form 5500 and return only the required JSON object.'
+          }
+        ]
+      }]
+    }, process.env.ANTHROPIC_API_KEY);
+
+    const rawText = extractTextFromAnthropicResponse(response);
+    const parsed = normalizeParsed(parseMaybeJSON(rawText));
+    const derived = buildDerivedInsights(parsed);
+
+    return jsonResponse(200, {
+      ok: true,
+      parsed: parsed,
+      partial: false,
+      repaired: false,
+      insights: null,
+      derived: derived
+    });
   } catch (err) {
     return jsonResponse(500, {
       ok: false,
-      error: err && err.message ? err.message : 'Function failed',
-      details: err && err.stack ? String(err.stack).slice(0, 2000) : String(err)
+      error: (err && err.message) ? err.message : 'Function failed.'
     });
   }
 };
