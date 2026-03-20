@@ -657,34 +657,53 @@ function buildInsights(parsed) {
 }
 
 async function callAnthropic(payload, apiKey) {
-  var resp = await fetch(API_URL, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01'
-    },
-    body: JSON.stringify(payload)
-  });
+  var controller = new AbortController();
+  var timeout = setTimeout(function() {
+    controller.abort();
+  }, 25000);
 
-  var text = await resp.text();
+  var resp, text, data;
 
-  var data = null;
   try {
-    data = JSON.parse(text);
-  } catch (e) {
-    data = null;
-  }
+    resp = await fetch(API_URL, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
 
-  if (!resp.ok) {
-    throw new Error((data && data.error && data.error.message) || text || ('Anthropic error ' + resp.status));
-  }
+    text = await resp.text();
 
-  if (!data || !Array.isArray(data.content)) {
-    throw new Error('Anthropic returned an unexpected response shape.');
-  }
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      throw new Error('Non-JSON response (likely timeout or HTML error)');
+    }
 
-  return data;
+    if (!resp.ok) {
+      throw new Error((data && data.error && data.error.message) || ('Anthropic error ' + resp.status));
+    }
+
+    if (!data || !Array.isArray(data.content)) {
+      throw new Error('Anthropic returned an unexpected response shape.');
+    }
+
+    return data;
+  } catch (err) {
+    if (!payload._retry) {
+      payload._retry = true;
+      payload.max_tokens = 1800;
+      return callAnthropic(payload, apiKey);
+    }
+
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 exports.handler = async function(event) {
@@ -760,7 +779,7 @@ exports.handler = async function(event) {
       derived: insights && insights.meta ? insights.meta : null
     });
   } catch (err) {
-    return jsonResponse(500, {
+    return jsonResponse(200, {
       ok: false,
       error: (err && err.message) ? err.message : 'Function failed.'
     });
