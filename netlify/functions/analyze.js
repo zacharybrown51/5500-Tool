@@ -656,7 +656,7 @@ function buildInsights(parsed) {
   };
 }
 
-async function callAnthropic(payload, apiKey) {
+async function callAnthropic(payload, apiKey, didRetry) {
   var controller = new AbortController();
   var timeout = setTimeout(function() {
     controller.abort();
@@ -694,10 +694,10 @@ async function callAnthropic(payload, apiKey) {
 
     return data;
   } catch (err) {
-    if (!payload._retry) {
-      payload._retry = true;
-      payload.max_tokens = 1800;
-      return callAnthropic(payload, apiKey);
+    if (!didRetry) {
+      var retryPayload = JSON.parse(JSON.stringify(payload));
+      retryPayload.max_tokens = 1800;
+      return callAnthropic(retryPayload, apiKey, true);
     }
 
     throw err;
