@@ -8,9 +8,9 @@ const CORS_HEADERS = {
 };
 
 const MARKET_CONFIG = [
-  { symbol: '^GSPC', label: 'S&P 500' },
-  { symbol: '^DJI', label: 'Dow' },
-  { symbol: '^IXIC', label: 'Nasdaq' }
+  { symbol: 'SPY', label: 'S&P 500' },
+  { symbol: 'DIA', label: 'Dow' },
+  { symbol: 'QQQ', label: 'Nasdaq' }
 ];
 
 function jsonResponse(statusCode, body) {
