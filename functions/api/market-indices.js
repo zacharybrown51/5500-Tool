@@ -95,6 +95,18 @@ async function fetchGoogleFinance() {
   return quotes;
 }
 
+function normalizeQuoteSymbols(quotes) {
+  var displayMap = {};
+  SYMBOLS.forEach(function(s) { 
+    displayMap[s.symbol] = s.display || decodeURIComponent(s.symbol);
+    displayMap[decodeURIComponent(s.symbol)] = s.display || decodeURIComponent(s.symbol);
+  });
+  return quotes.map(function(q) {
+    q.symbol = displayMap[q.symbol] || decodeURIComponent(q.symbol);
+    return q;
+  });
+}
+
 export async function onRequestOptions() {
   return new Response('', {
     headers: {
@@ -111,19 +123,19 @@ export async function onRequestGet() {
   // Try Yahoo v7
   try {
     var quotes = await fetchYahoo();
-    return jsonResp(200, { ok: true, quotes: quotes, source: 'yahoo-v7' });
+    return jsonResp(200, { ok: true, quotes: normalizeQuoteSymbols(quotes), source: 'yahoo-v7' });
   } catch (e) { errors.push('yahoo-v7: ' + e.message); }
 
   // Try Yahoo v8
   try {
     var quotes = await fetchYahooV8();
-    return jsonResp(200, { ok: true, quotes: quotes, source: 'yahoo-v8' });
+    return jsonResp(200, { ok: true, quotes: normalizeQuoteSymbols(quotes), source: 'yahoo-v8' });
   } catch (e) { errors.push('yahoo-v8: ' + e.message); }
 
   // Try Google Finance
   try {
     var quotes = await fetchGoogleFinance();
-    return jsonResp(200, { ok: true, quotes: quotes, source: 'google' });
+    return jsonResp(200, { ok: true, quotes: normalizeQuoteSymbols(quotes), source: 'google' });
   } catch (e) { errors.push('google: ' + e.message); }
 
   return jsonResp(200, { ok: false, error: errors.join(' | '), quotes: [] });
