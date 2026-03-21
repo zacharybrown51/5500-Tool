@@ -1,4 +1,4 @@
-const API_URL = 'https://api.anthropic.com/v1/messages';
+const API_URL = (process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com') + '/v1/messages';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -7,90 +7,8 @@ const CORS_HEADERS = {
   'Content-Type': 'application/json'
 };
 
-const EXTRACTION_SYSTEM_PROMPT = `You are a Form 5500 retirement plan filing analyst.
-
-Extract useful retirement-plan data from a Form 5500 PDF into one valid JSON object.
-
-Rules:
-- Return exactly one valid JSON object
-- No markdown
-- No commentary
-- No trailing commas
-- If a field is not found, use null
-- Prefer accuracy over completeness
-- Do not invent values
-- Keep arrays concise:
-  - investments: include up to 20 clearly identified holdings
-  - serviceProviders: include up to 15 clearly identified providers
-  - assetAllocation: include clearly stated categories only
-  - planFeatures: include only clearly inferable features/codes, with no duplicates
-- Do not repeat the same plan feature multiple times
-- Do not repeat the same investment multiple times
-- Do not repeat the same service provider multiple times
-
-Very important instructions for participant loans:
-- "participantLoans" should only reflect loans or notes receivable from participants
-- Only populate "participantLoans" if the filing clearly shows participant loans / notes receivable from participants as a distinct line item or clearly states that amount
-- Do NOT use total assets, net assets, or any broad investment total as participantLoans
-- Do NOT guess participantLoans from a general asset allocation table unless the participant loan amount is explicitly identifiable
-- If unclear, use null
-
-Return this exact JSON shape:
-{
-  "planName": string|null,
-  "sponsor": string|null,
-  "ein": string|null,
-  "planNumber": string|null,
-  "planYear": string|null,
-  "planType": string|null,
-  "filingType": string|null,
-  "participants": {
-    "beginningOfYear": number|null,
-    "activeEndOfYear": number|null,
-    "totalEndOfYear": number|null,
-    "retired": number|null,
-    "separated": number|null,
-    "deceased": number|null,
-    "withAccountBalances": number|null,
-    "terminatedUnvested": number|null
-  },
-  "financials": {
-    "totalAssetsBOY": number|null,
-    "totalAssetsEOY": number|null,
-    "netAssets": number|null,
-    "totalContributions": number|null,
-    "employerContributions": number|null,
-    "participantContributions": number|null,
-    "rollovers": number|null,
-    "benefitsPaid": number|null,
-    "totalIncome": number|null,
-    "totalExpenses": number|null,
-    "adminExpenses": number|null,
-    "investmentGainLoss": number|null,
-    "netIncome": number|null,
-    "participantLoans": number|null,
-    "employerSecurities": number|null
-  },
-  "assetAllocation": [{"category": string, "beginningValue": number|null, "endValue": number|null}],
-  "investments": [{"name": string, "value": number|null, "type": string|null}],
-  "serviceProviders": [{"name": string, "ein": string|null, "role": string|null, "serviceCodes": string|null, "directCompensation": number|null, "indirectCompensation": number|null, "relationship": string|null}],
-  "planFeatures": [{"code": string, "description": string}],
-  "compliance": {
-    "lateContributions": boolean|null,
-    "lateContributionAmount": number|null,
-    "prohibitedTransactions": boolean|null,
-    "loansInDefault": boolean|null,
-    "fidelityBond": boolean|null,
-    "fidelityBondAmount": number|null,
-    "blackoutPeriod": boolean|null,
-    "failedToPayBenefits": boolean|null,
-    "assetsHeldForInvestment": boolean|null,
-    "planTerminating": boolean|null
-  },
-  "auditor": {"name": string|null, "ein": string|null, "opinionType": string|null},
-  "fundingInfo": {"minimumRequired": number|null, "actualContribution": number|null, "fundingShortfall": number|null},
-  "notes": string|null
-}`;
+const EXTRACTION_SYSTEM_PROMPT = `Form 5500 analyst. Extract data into one valid JSON object. Rules: no markdown, no commentary, no trailing commas. Use null for missing fields. Accuracy over completeness. Do not invent values. No duplicate entries. Limits: investments<=20, serviceProviders<=15, planFeatures no duplicates. participantLoans: ONLY from explicit participant loan/notes receivable line items. Never use total assets or broad totals. If unclear, null.
+JSON shape: {"planName":null,"sponsor":null,"ein":null,"planNumber":null,"planYear":null,"planType":null,"filingType":null,"participants":{"beginningOfYear":null,"activeEndOfYear":null,"totalEndOfYear":null,"retired":null,"separated":null,"deceased":null,"withAccountBalances":null,"terminatedUnvested":null},"financials":{"totalAssetsBOY":null,"totalAssetsEOY":null,"netAssets":null,"totalContributions":null,"employerContributions":null,"participantContributions":null,"rollovers":null,"benefitsPaid":null,"totalIncome":null,"totalExpenses":null,"adminExpenses":null,"investmentGainLoss":null,"netIncome":null,"participantLoans":null,"employerSecurities":null},"assetAllocation":[{"category":"","beginningValue":null,"endValue":null}],"investments":[{"name":"","value":null,"type":null}],"serviceProviders":[{"name":"","ein":null,"role":null,"serviceCodes":null,"directCompensation":null,"indirectCompensation":null,"relationship":null}],"planFeatures":[{"code":"","description":""}],"compliance":{"lateContributions":null,"lateContributionAmount":null,"prohibitedTransactions":null,"loansInDefault":null,"fidelityBond":null,"fidelityBondAmount":null,"blackoutPeriod":null,"failedToPayBenefits":null,"assetsHeldForInvestment":null,"planTerminating":null},"auditor":{"name":null,"ein":null,"opinionType":null},"fundingInfo":{"minimumRequired":null,"actualContribution":null,"fundingShortfall":null},"notes":null}`;
 
 function jsonResponse(statusCode, body) {
   return {
@@ -685,7 +603,11 @@ async function callAnthropic(payload, apiKey, didRetry) {
     }
 
     if (!resp.ok) {
-      throw new Error((data && data.error && data.error.message) || ('Anthropic error ' + resp.status));
+      var errMsg = (data && data.error && data.error.message) || ('Anthropic error ' + resp.status);
+      if (resp.status === 429 || (errMsg && errMsg.indexOf('rate limit') >= 0)) {
+        throw new Error('The filing is too large for the current API rate limit. Try a shorter PDF (under ~20 pages) or wait a minute and try again.');
+      }
+      throw new Error(errMsg);
     }
 
     if (!data || !Array.isArray(data.content)) {
@@ -735,15 +657,15 @@ exports.handler = async function(event) {
       return jsonResponse(400, { ok: false, error: 'Missing base64 PDF payload.' });
     }
 
-    if (body.base64.length > 7000000) {
+    if (body.base64.length > 4500000) {
       return jsonResponse(413, {
         ok: false,
-        error: 'This PDF is too large for the current Netlify function setup. Try a smaller filing or compress the PDF first.'
+        error: 'This PDF is too large. Try a shorter filing (under ~25 pages) or compress the PDF first.'
       });
     }
 
     var extractionResponse = await callAnthropic({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: 2800,
       temperature: 0,
       system: EXTRACTION_SYSTEM_PROMPT,

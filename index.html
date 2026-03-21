@@ -1679,11 +1679,21 @@ h+='</div></div>';
 h+='<div class="az-body">';
 
 // Upload area
+h+='<div id="azUploadWrap" style="position:relative">';
 h+='<div class="az-upload" id="azUpload">';
 h+='<div class="az-upload-icon">&#128196;</div>';
 h+='<div class="az-upload-text">Drop a Form 5500 PDF here, or click to browse</div>';
 h+='<div class="az-upload-hint">Supports Form 5500, 5500-SF, and schedules C, H, I, R, A, and D</div>';
 h+='<input type="file" id="azFileInput" accept=".pdf" style="display:none" multiple>';
+h+='</div>';
+
+// Processing indicator (hidden by default, overlays upload area)
+h+='<div id="azProcessing" style="display:none;position:absolute;inset:0;text-align:center;padding:48px;background:linear-gradient(180deg,rgba(255,255,255,.96),rgba(245,249,253,.94));border-radius:26px;border:1.5px dashed rgba(26,141,255,.35);z-index:2;align-items:center;justify-content:center;flex-direction:column">';
+h+='<div class="az-spinner"></div>';
+h+='<div id="azProcText" style="font-size:14px;color:var(--txh);margin-top:16px;font-family:Jost,sans-serif;font-weight:600">Analyzing filing...</div>';
+h+='<div id="azProcSub" style="font-size:11px;color:var(--tx3);margin-top:6px;font-family:Jost,sans-serif">Reading schedules and extracting data</div>';
+h+='<div style="display:flex;justify-content:center;gap:6px;margin-top:16px" id="azDots"><div class="az-dot"></div><div class="az-dot"></div><div class="az-dot"></div><div class="az-dot"></div></div>';
+h+='</div>';
 h+='</div>';
 h+='<div class="az-story-grid">';
 h+='<div class="az-info-card">';
@@ -1702,14 +1712,6 @@ h+='<div class="az-quick-item"><b>Better meeting prep</b><span>Surface what look
 h+='<div class="az-quick-item"><b>Cleaner audited-plan workflow</b><span>Export investment lineups to CSV when a filing includes enough detail to use it.</span></div>';
 h+='</div>';
 h+='</div>';
-h+='</div>';
-
-// Processing indicator (hidden by default)
-h+='<div id="azProcessing" style="display:none;text-align:center;padding:48px">';
-h+='<div class="az-spinner"></div>';
-h+='<div id="azProcText" style="font-size:14px;color:var(--txh);margin-top:16px;font-family:Jost,sans-serif;font-weight:600">Analyzing filing...</div>';
-h+='<div id="azProcSub" style="font-size:11px;color:var(--tx3);margin-top:6px;font-family:Jost,sans-serif">Reading schedules and extracting data</div>';
-h+='<div style="display:flex;justify-content:center;gap:6px;margin-top:16px" id="azDots"><div class="az-dot"></div><div class="az-dot"></div><div class="az-dot"></div><div class="az-dot"></div></div>';
 h+='</div>';
 
 // Results area
@@ -1821,18 +1823,15 @@ var isPDF=file.name.toLowerCase().endsWith('.pdf');
 var isCSV=file.name.toLowerCase().endsWith('.csv');
 if(!isPDF&&!isCSV){alert('Please upload a PDF or CSV file.');return}
 
-document.getElementById('azUpload').style.display='none';
-document.getElementById('azProcessing').style.display='block';
+document.getElementById('azUpload').style.visibility='hidden';
+document.getElementById('azProcessing').style.display='flex';
 var procMsgs=['Reading form data...','Parsing Schedule C providers...','Analyzing investment lineup...','Checking compliance flags...','Generating observations...'];
 var procIdx=0;
 var procInterval=setInterval(function(){procIdx++;if(procIdx<procMsgs.length){document.getElementById('azProcText').textContent=procMsgs[procIdx];document.getElementById('azProcSub').textContent=['Identifying service providers','Extracting fund names and values','Reviewing DOL compliance items','Building comprehensive analysis'][procIdx-1]||''}},3000);
-document.getElementById('azProcessing').querySelector('div').textContent='Analyzing filing...';
 
 var reader=new FileReader();
 reader.onload=function(e){
 var base64=btoa(new Uint8Array(e.target.result).reduce(function(data,byte){return data+String.fromCharCode(byte)},''));
-
-var systemPrompt='You are a Form 5500 retirement plan filing analyst. Extract ALL available data from this filing into a structured JSON response. Be thorough - extract every number, every provider name, every fund name you can find.\n\nReturn ONLY valid JSON (no markdown, no backticks, no explanation) with this exact structure:\n{\n  "planName": "string",\n  "sponsor": "string",\n  "ein": "string (digits only)",\n  "planNumber": "string",\n  "planYear": "string",\n  "planType": "string (e.g. 401k, 403b, DB, etc.)",\n  "filingType": "string (5500, 5500-SF, amended, etc.)",\n  "participants": {\n    "beginningOfYear": number or null,\n    "activeEndOfYear": number or null,\n    "totalEndOfYear": number or null,\n    "retired": number or null,\n    "separated": number or null,\n    "deceased": number or null,\n    "withAccountBalances": number or null,\n    "terminatedUnvested": number or null\n  },\n  "financials": {\n    "totalAssetsBOY": number or null,\n    "totalAssetsEOY": number or null,\n    "netAssets": number or null,\n    "totalContributions": number or null,\n    "employerContributions": number or null,\n    "participantContributions": number or null,\n    "rollovers": number or null,\n    "benefitsPaid": number or null,\n    "totalIncome": number or null,\n    "totalExpenses": number or null,\n    "adminExpenses": number or null,\n    "investmentGainLoss": number or null,\n    "netIncome": number or null,\n    "participantLoans": number or null,\n    "employerSecurities": number or null\n  },\n  "assetAllocation": [\n    {"category": "string", "beginningValue": number or null, "endValue": number or null}\n  ],\n  "investments": [\n    {"name": "string", "value": number or null, "type": "string (mutual fund, CCT, etc.)"}\n  ],\n  "serviceProviders": [\n    {"name": "string", "ein": "string or null", "role": "string (Recordkeeper, TPA, Advisor, Auditor, Custodian, etc.)", "serviceCodes": "string or null", "directCompensation": number or null, "indirectCompensation": number or null, "relationship": "string or null"}\n  ],\n  "planFeatures": [\n    {"code": "string", "description": "string"}\n  ],\n  "compliance": {\n    "lateContributions": boolean,\n    "lateContributionAmount": number or null,\n    "prohibitedTransactions": boolean,\n    "loansInDefault": boolean,\n    "fidelityBond": boolean,\n    "fidelityBondAmount": number or null,\n    "blackoutPeriod": boolean,\n    "failedToPayBenefits": boolean,\n    "assetsHeldForInvestment": boolean,\n    "planTerminating": boolean\n  },\n  "auditor": {\n    "name": "string or null",\n    "ein": "string or null",\n    "opinionType": "string or null (unmodified, qualified, disclaimer, adverse)"\n  },\n  "fundingInfo": {\n    "minimumRequired": number or null,\n    "actualContribution": number or null,\n    "fundingShortfall": number or null\n  },\n  "notes": "string - any additional observations, red flags, or notable items you see in the filing"\n}';
 
 fetch('/.netlify/functions/analyze',{
 method:'POST',
@@ -1840,13 +1839,12 @@ headers:{'Content-Type':'application/json'},
 body:JSON.stringify({
 mode:'extract_5500',
 base64:base64,
-fileName:file.name,
-systemPrompt:systemPrompt
+fileName:file.name
 })
 }).then(function(resp){
 return resp.json().then(function(data){return {ok:resp.ok,status:resp.status,data:data}});
 }).then(function(res){
-document.getElementById('azProcessing').style.display='none';if(typeof procInterval!=='undefined')clearInterval(procInterval);
+document.getElementById('azProcessing').style.display='none';document.getElementById('azUpload').style.visibility='visible';if(typeof procInterval!=='undefined')clearInterval(procInterval);
 if(!res.ok||!res.data||!res.data.ok){throw {message:(res.data&&res.data.error)||('Analysis request failed ('+res.status+')'),rawText:res.data&&res.data.rawText,details:res.data&&res.data.details}}
 var parsed=res.data.parsed||{};
 parsed.filename=file.name;
@@ -1859,7 +1857,7 @@ for(var i=0;i<D.length;i++){if(D[i][14].replace(/-/g,'')===cleanEin){parsed.dbMa
 renderSmartAnalysis(parsed);
 }).catch(function(err){
 document.getElementById('azProcessing').style.display='none';
-document.getElementById('azUpload').style.display='block';
+document.getElementById('azUpload').style.visibility='visible';
 document.getElementById('azResults').style.display='block';
 document.getElementById('azResults').innerHTML='<div class="az-card"><div class="az-card-body"><div style="color:var(--coral);font-family:Jost,sans-serif;font-size:14px;margin-bottom:8px">Analysis Error</div><div style="font-size:12px;color:var(--tx2)">'+H(err.message||'Analysis failed')+'</div>'+(err.details?'<pre style="margin-top:12px;font-size:10px;color:var(--tx3);white-space:pre-wrap;max-height:160px;overflow:auto">'+H(err.details)+'</pre>':'')+(err.rawText?'<pre style="margin-top:12px;font-size:10px;color:var(--tx3);white-space:pre-wrap;max-height:220px;overflow:auto">'+H(err.rawText)+'</pre>':'')+'</div></div>'})};
 reader.readAsArrayBuffer(file)}
@@ -1867,7 +1865,7 @@ reader.readAsArrayBuffer(file)}
 function renderSmartAnalysis(r){
 var el=document.getElementById('azResults');
 el.style.display='block';
-document.getElementById('azUpload').style.display='block';
+document.getElementById('azUpload').style.visibility='visible';
 
 var h='';
 if(r._partialExtraction){

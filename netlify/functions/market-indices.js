@@ -1,4 +1,4 @@
-const FMP_API_KEY = '3gipL1YiTdgPYBKkenyDOUfhoy3dT2ND';
+const FMP_API_KEY = process.env.FMP_API_KEY || process.env.FMP_KEY || '';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -70,6 +70,10 @@ exports.handler = async function(event) {
 
   if (event.httpMethod !== 'GET') {
     return jsonResponse(405, { ok: false, error: 'Method not allowed.' });
+  }
+
+  if (!FMP_API_KEY) {
+    return jsonResponse(200, { ok: false, error: 'Missing FMP_API_KEY environment variable.', quotes: [] });
   }
 
   try {
