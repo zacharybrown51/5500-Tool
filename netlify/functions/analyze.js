@@ -744,7 +744,7 @@ exports.handler = async function(event) {
 
     var extractionResponse = await callAnthropic({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 2800,
+      max_tokens: 4096,
       temperature: 0,
       system: EXTRACTION_SYSTEM_PROMPT,
       messages: [{
