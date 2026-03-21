@@ -1,4 +1,4 @@
-const FMP_API_KEY = '3gipL1YiTdgPYBKkenyDOUfhoy3dT2ND';
+const FMP_API_KEY = process.env.FMP_API_KEY || '3gipL1YiTdgPYBKkenyDOUfhoy3dT2ND';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -14,72 +14,42 @@ const MARKET_CONFIG = [
 ];
 
 function jsonResponse(statusCode, body) {
-  return {
-    statusCode,
-    headers: CORS_HEADERS,
-    body: JSON.stringify(body)
-  };
+  return { statusCode, headers: CORS_HEADERS, body: JSON.stringify(body) };
 }
 
-async function fetchIndexQuote(symbol) {
-  const url = 'https://financialmodelingprep.com/api/v3/quote/' + encodeURIComponent(symbol) + '?apikey=' + encodeURIComponent(FMP_API_KEY);
-  const resp = await fetch(url, {
-    method: 'GET',
-    headers: { 'Accept': 'application/json' }
-  });
-
-  const text = await resp.text();
-  let data = null;
-  try {
-    data = JSON.parse(text);
-  } catch (e) {
-    data = null;
-  }
-
-  if (!resp.ok) {
-    throw new Error(symbol + ' request failed with ' + resp.status + (text ? ' - ' + text.slice(0, 160) : ''));
-  }
-
-  if (!Array.isArray(data) || !data.length) {
-    throw new Error(symbol + ' returned no quote data');
-  }
-
-  const row = data[0] || {};
-  const price = Number(row.price);
-  let changesPercentage = Number(row.changesPercentage);
-  if (!isFinite(changesPercentage)) {
-    const change = Number(row.change);
-    if (isFinite(change) && isFinite(price) && price !== 0) {
-      changesPercentage = (change / (price - change)) * 100;
-    } else {
-      changesPercentage = null;
+async function fetchQuotesBatch() {
+  var symbols = MARKET_CONFIG.map(function(i) { return i.symbol; }).join(',');
+  var url = 'https://financialmodelingprep.com/api/v3/quote/' + symbols + '?apikey=' + encodeURIComponent(FMP_API_KEY);
+  var resp = await fetch(url, { method: 'GET', headers: { 'Accept': 'application/json' } });
+  var text = await resp.text();
+  if (!resp.ok) throw new Error('FMP ' + resp.status + ': ' + text.slice(0, 200));
+  var data;
+  try { data = JSON.parse(text); } catch (e) { throw new Error('FMP non-JSON: ' + text.slice(0, 200)); }
+  if (!Array.isArray(data) || !data.length) throw new Error('FMP empty. Key may be expired. Raw: ' + text.slice(0, 200));
+  return data.map(function(row) {
+    var price = Number(row.price);
+    var pct = Number(row.changesPercentage);
+    if (!isFinite(pct)) {
+      var ch = Number(row.change);
+      if (isFinite(ch) && isFinite(price) && price !== 0) pct = (ch / (price - ch)) * 100;
+      else pct = null;
     }
-  }
-
-  return {
-    symbol,
-    price: isFinite(price) ? price : null,
-    changesPercentage: isFinite(changesPercentage) ? changesPercentage : null
-  };
+    return { symbol: row.symbol || '', price: isFinite(price) ? price : null, changesPercentage: isFinite(pct) ? pct : null };
+  });
 }
 
 exports.handler = async function(event) {
-  if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 200, headers: CORS_HEADERS, body: '' };
-  }
-
-  if (event.httpMethod !== 'GET') {
-    return jsonResponse(405, { ok: false, error: 'Method not allowed.' });
-  }
-
+  if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers: CORS_HEADERS, body: '' };
+  if (event.httpMethod !== 'GET') return jsonResponse(405, { ok: false, error: 'Method not allowed.' });
   try {
-    const quotes = await Promise.all(MARKET_CONFIG.map(item => fetchIndexQuote(item.symbol)));
-    return jsonResponse(200, { ok: true, quotes });
+    var quotes = await fetchQuotesBatch();
+    return jsonResponse(200, { ok: true, quotes: quotes });
   } catch (err) {
     return jsonResponse(200, {
       ok: false,
-      error: err && err.message ? err.message : 'Market indices request failed.',
-      quotes: []
+      error: err && err.message ? err.message : 'Failed.',
+      quotes: [],
+      debug: { apiKeyPresent: !!FMP_API_KEY, apiKeySource: process.env.FMP_API_KEY ? 'env' : 'hardcoded', symbols: MARKET_CONFIG.map(function(i) { return i.symbol; }) }
     });
   }
 };
