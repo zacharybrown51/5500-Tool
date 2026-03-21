@@ -660,7 +660,7 @@ async function callAnthropic(payload, apiKey, didRetry) {
   var controller = new AbortController();
   var timeout = setTimeout(function() {
     controller.abort();
-  }, 25000);
+  }, 55000);
 
   var resp, text, data;
 
@@ -719,14 +719,14 @@ exports.handler = async function(event) {
     return jsonResponse(500, { ok: false, error: 'Missing ANTHROPIC_API_KEY environment variable in Netlify.' });
   }
 
+  var body;
   try {
-    var body;
-    try {
-      body = JSON.parse(event.body || '{}');
-    } catch (e) {
-      return jsonResponse(400, { ok: false, error: 'Request body must be valid JSON.' });
-    }
+    body = JSON.parse(event.body || '{}');
+  } catch (e) {
+    return jsonResponse(400, { ok: false, error: 'Request body must be valid JSON.' });
+  }
 
+  try {
     if (body.mode !== 'extract_5500') {
       return jsonResponse(400, { ok: false, error: 'Unsupported mode.' });
     }
