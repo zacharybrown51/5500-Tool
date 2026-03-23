@@ -45,7 +45,12 @@ async function fetchQuotesAndCharts() {
 
       var meta = chart.meta || {};
       var price = Number(meta.regularMarketPrice);
-      var prevClose = Number(meta.chartPreviousClose || meta.previousClose);
+      // Use previousClose (yesterday's close) for daily change, NOT chartPreviousClose (5-day ago)
+      var prevClose = Number(meta.previousClose);
+      // Fallback to chartPreviousClose only if previousClose is missing
+      if (!isFinite(prevClose) || prevClose <= 0) {
+        prevClose = Number(meta.chartPreviousClose);
+      }
       var pct = (isFinite(price) && isFinite(prevClose) && prevClose > 0)
         ? ((price - prevClose) / prevClose) * 100 : null;
 
@@ -63,7 +68,8 @@ async function fetchQuotesAndCharts() {
         sparkline.push(Math.round(price * 100) / 100);
       }
 
-      var marketState = meta.marketState || '';
+      // Market state: REGULAR = open, PRE = pre-market, POST = after hours, CLOSED/PREPRE = closed
+      var marketState = (meta.marketState || '').toUpperCase();
       var exchangeClose = meta.currentTradingPeriod && meta.currentTradingPeriod.regular && meta.currentTradingPeriod.regular.end;
       var lastTradeTime = meta.regularMarketTime;
 
@@ -102,12 +108,14 @@ export async function onRequestGet() {
     // Determine market status from first quote
     var mktState = quotes[0] && quotes[0].marketState ? quotes[0].marketState : 'CLOSED';
     var isOpen = mktState === 'REGULAR';
+    var isPrePost = mktState === 'PRE' || mktState === 'POST' || mktState === 'POSTPOST';
     var lastTs = quotes[0] && quotes[0].lastTradeTimestamp ? quotes[0].lastTradeTimestamp : null;
 
     return jsonResp(200, {
       ok: true,
       quotes: quotes,
-      marketStatus: isOpen ? 'open' : 'closed',
+      marketStatus: isOpen ? 'open' : (isPrePost ? 'prepost' : 'closed'),
+      marketState: mktState,
       lastUpdated: lastTs,
       source: 'yahoo-v8'
     });
