@@ -55,6 +55,7 @@ const GENERIC_TDF = /(?:target\s+(?:date|retirement)|lifecycle|lifepath|life\s*p
 // Fund type patterns
 const FUND_TYPES = [
   { type: 'Target Date Fund', pattern: /target\s+(?:date|retirement)|lifecycle|lifepath|life\s*path|freedom\s+\d{4}|smartretirement|retir(?:esmart|ement\s+\d{4})|one\s+choice\s+\d{4}|lifetime\s+\d{4}/i },
+  { type: 'CIT/CIF', pattern: /\bcollective\s+(?:invest(?:ment)?|trust)\b|\b(?:cit|cif)\b|\bcommingled\b|\bcommon\s+trust\b|\btrust\s+(?:fund|class)\b|\bcollective\s+fund\b|\bpooled\s+fund\b/i },
   { type: 'Index Fund', pattern: /\bindex\s+(?:fund|trust)\b|\b(?:500|s&p|total\s+(?:stock|bond|intl)|russell|msci)\s+index\b/i },
   { type: 'Stable Value', pattern: /\bstable\s+value\b|\bfixed\s+income\b.*\bstable\b|\bgic\b|\bguaranteed\b/i },
   { type: 'Money Market', pattern: /\bmoney\s+market\b|\bcash\s+(?:reserve|management)\b/i },
@@ -135,11 +136,17 @@ function scanForFunds(text) {
     tdfProvider: null,
     tdfYears: [],
     funds: [],
+    hasCIT: false,
     confidence: 'none',
     textLength: text.length,
   };
   
   if (!text || text.length < 50) return results;
+  
+  // Check for CIT/CIF usage
+  if (/\bcollective\s+(?:invest(?:ment)?|trust)\b|\bcommingled\b|\bcommon\s+(?:collective|trust)\b|\b(?:cit|cif)\s+(?:fund|class|tier)\b/i.test(text)) {
+    results.hasCIT = true;
+  }
   
   // Scan for fund families
   var familyHits = {};
