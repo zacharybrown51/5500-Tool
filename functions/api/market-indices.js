@@ -1,5 +1,7 @@
 // Cloudflare Pages Function: /api/market-indices
-// Yahoo Finance — dual fetch: quote for daily data, chart for sparklines
+// Yahoo Finance v8 chart endpoint (no auth required)
+// Uses range=1d for daily change + range=5d for sparklines
+// Market open/closed determined from trading period timestamps, NOT marketState string
 
 const SYMBOLS = [
   { symbol: '%5EGSPC', label: 'S&P 500', display: '^GSPC' },
@@ -31,91 +33,151 @@ function normalizeSymbol(sym) {
   return map[sym] || decodeURIComponent(sym);
 }
 
-// Fetch sparkline data from chart endpoint
-async function fetchSparklines() {
-  var sparklines = {};
-  for (var i = 0; i < SYMBOLS.length; i++) {
-    var sym = SYMBOLS[i].symbol;
-    try {
-      var url = 'https://query2.finance.yahoo.com/v8/finance/chart/' + sym + '?interval=1d&range=5d';
-      var resp = await fetch(url, { headers: YF_HEADERS });
-      if (!resp.ok) continue;
-      var data = await resp.json();
-      var chart = data && data.chart && data.chart.result && data.chart.result[0];
-      if (!chart) continue;
+// Determine if market is currently open from trading period timestamps
+function getMarketStatus(meta) {
+  var now = Math.floor(Date.now() / 1000);
 
-      var closes = (chart.indicators && chart.indicators.quote && chart.indicators.quote[0] && chart.indicators.quote[0].close) || [];
-      var sparkline = [];
-      for (var j = 0; j < closes.length; j++) {
-        if (closes[j] != null && isFinite(closes[j])) {
-          sparkline.push(Math.round(closes[j] * 100) / 100);
-        }
-      }
-      sparklines[SYMBOLS[i].display] = sparkline;
-    } catch (e) { /* skip */ }
+  // Yahoo provides currentTradingPeriod with unix timestamps for regular/pre/post hours
+  var tp = meta.currentTradingPeriod;
+  if (tp && tp.regular) {
+    var regStart = tp.regular.start;
+    var regEnd = tp.regular.end;
+
+    if (now >= regStart && now <= regEnd) {
+      return 'open';
+    }
+
+    // Check pre-market
+    if (tp.pre && now >= tp.pre.start && now < regStart) {
+      return 'prepost';
+    }
+
+    // Check post-market
+    if (tp.post && now > regEnd && now <= tp.post.end) {
+      return 'prepost';
+    }
   }
-  return sparklines;
+
+  // Also check the marketState string as secondary signal
+  var state = (meta.marketState || '').toUpperCase();
+  if (state === 'REGULAR') return 'open';
+  if (state === 'PRE' || state === 'POST' || state === 'POSTPOST') return 'prepost';
+
+  return 'closed';
 }
 
-// Fetch real-time quotes — try multiple Yahoo endpoints
-async function fetchQuotes() {
-  var symbolList = SYMBOLS.map(function(s) { return s.symbol; }).join(',');
-
-  // Try v7 quote endpoint (best for real-time daily data)
-  try {
-    var url7 = 'https://query2.finance.yahoo.com/v7/finance/quote?symbols=' + symbolList;
-    var resp7 = await fetch(url7, { headers: YF_HEADERS });
-    if (resp7.ok) {
-      var data7 = await resp7.json();
-      if (data7 && data7.quoteResponse && data7.quoteResponse.result && data7.quoteResponse.result.length) {
-        return { source: 'v7-quote', quotes: data7.quoteResponse.result };
-      }
-    }
-  } catch (e) { /* try next */ }
-
-  // Try v6 quote endpoint
-  try {
-    var url6 = 'https://query2.finance.yahoo.com/v6/finance/quote?symbols=' + symbolList;
-    var resp6 = await fetch(url6, { headers: YF_HEADERS });
-    if (resp6.ok) {
-      var data6 = await resp6.json();
-      if (data6 && data6.quoteResponse && data6.quoteResponse.result && data6.quoteResponse.result.length) {
-        return { source: 'v6-quote', quotes: data6.quoteResponse.result };
-      }
-    }
-  } catch (e) { /* try next */ }
-
-  // Fallback: use chart meta for each symbol individually
+async function fetchAllData() {
   var results = [];
+  var marketStatus = 'closed';
+  var lastTs = null;
+  var debugInfo = {};
+
   for (var i = 0; i < SYMBOLS.length; i++) {
     var sym = SYMBOLS[i].symbol;
-    try {
-      var chartUrl = 'https://query2.finance.yahoo.com/v8/finance/chart/' + sym + '?interval=1d&range=1d';
-      var chartResp = await fetch(chartUrl, { headers: YF_HEADERS });
-      if (!chartResp.ok) continue;
-      var chartData = await chartResp.json();
-      var chart = chartData && chartData.chart && chartData.chart.result && chartData.chart.result[0];
-      if (!chart) continue;
-      var meta = chart.meta || {};
+    var display = SYMBOLS[i].display;
 
-      // For 1d range, chartPreviousClose IS yesterday's close
-      var price = meta.regularMarketPrice;
-      var prevClose = meta.chartPreviousClose || meta.previousClose;
+    try {
+      // Fetch 1d chart (for accurate daily change) and 5d chart (for sparkline) in parallel
+      var [resp1d, resp5d] = await Promise.all([
+        fetch('https://query2.finance.yahoo.com/v8/finance/chart/' + sym + '?interval=5m&range=1d', { headers: YF_HEADERS }),
+        fetch('https://query2.finance.yahoo.com/v8/finance/chart/' + sym + '?interval=1d&range=5d', { headers: YF_HEADERS })
+      ]);
+
+      // Parse 1d data (for price, daily change, market status)
+      var chart1d = null;
+      if (resp1d.ok) {
+        var data1d = await resp1d.json();
+        chart1d = data1d && data1d.chart && data1d.chart.result && data1d.chart.result[0];
+      }
+
+      // Parse 5d data (for sparkline)
+      var chart5d = null;
+      if (resp5d.ok) {
+        var data5d = await resp5d.json();
+        chart5d = data5d && data5d.chart && data5d.chart.result && data5d.chart.result[0];
+      }
+
+      if (!chart1d && !chart5d) continue;
+
+      var meta = (chart1d && chart1d.meta) || (chart5d && chart5d.meta) || {};
+      var price = Number(meta.regularMarketPrice);
+
+      // For 1d range, chartPreviousClose = yesterday's close (exactly what we want)
+      var meta1d = chart1d ? chart1d.meta : {};
+      var prevClose = Number(meta1d.chartPreviousClose || meta1d.previousClose);
+      if (!isFinite(prevClose) || prevClose <= 0) {
+        prevClose = Number(meta.previousClose || meta.chartPreviousClose);
+      }
+
+      var change = null;
+      var changePct = null;
+      if (isFinite(price) && isFinite(prevClose) && prevClose > 0) {
+        change = Math.round((price - prevClose) * 100) / 100;
+        changePct = ((price - prevClose) / prevClose) * 100;
+      }
+
+      // Build 5-day sparkline from the 5d chart
+      var sparkline = [];
+      if (chart5d) {
+        var closes = (chart5d.indicators && chart5d.indicators.quote && chart5d.indicators.quote[0] && chart5d.indicators.quote[0].close) || [];
+        for (var j = 0; j < closes.length; j++) {
+          if (closes[j] != null && isFinite(closes[j])) {
+            sparkline.push(Math.round(closes[j] * 100) / 100);
+          }
+        }
+      }
+      // Add current price as last point
+      if (isFinite(price) && (sparkline.length === 0 || sparkline[sparkline.length - 1] !== Math.round(price * 100) / 100)) {
+        sparkline.push(Math.round(price * 100) / 100);
+      }
+
+      // Determine market status from the first symbol's trading period
+      if (i === 0) {
+        marketStatus = getMarketStatus(meta);
+        lastTs = meta.regularMarketTime || null;
+
+        debugInfo = {
+          marketStateString: meta.marketState || 'missing',
+          computedStatus: marketStatus,
+          regularMarketTime: meta.regularMarketTime,
+          price: price,
+          prevClose1d: Number(meta1d.chartPreviousClose),
+          prevCloseField: Number(meta.previousClose),
+          change: change,
+          changePct: changePct,
+          tradingPeriod: meta.currentTradingPeriod ? {
+            preStart: meta.currentTradingPeriod.pre ? meta.currentTradingPeriod.pre.start : null,
+            regStart: meta.currentTradingPeriod.regular ? meta.currentTradingPeriod.regular.start : null,
+            regEnd: meta.currentTradingPeriod.regular ? meta.currentTradingPeriod.regular.end : null,
+            postEnd: meta.currentTradingPeriod.post ? meta.currentTradingPeriod.post.end : null
+          } : 'missing',
+          serverTimeNow: Math.floor(Date.now() / 1000),
+          fetchedAt: new Date().toISOString()
+        };
+      }
 
       results.push({
-        symbol: meta.symbol || decodeURIComponent(sym),
-        regularMarketPrice: price,
-        regularMarketPreviousClose: prevClose,
-        regularMarketChange: (price && prevClose) ? price - prevClose : null,
-        regularMarketChangePercent: (price && prevClose && prevClose > 0) ? ((price - prevClose) / prevClose) * 100 : null,
-        marketState: meta.marketState,
-        regularMarketTime: meta.regularMarketTime,
-        exchangeName: meta.exchangeName,
-        _fromChart: true
+        symbol: display,
+        price: isFinite(price) ? price : null,
+        previousClose: isFinite(prevClose) ? prevClose : null,
+        changesPercentage: isFinite(changePct) ? changePct : null,
+        change: isFinite(change) ? change : null,
+        sparkline: sparkline,
+        marketState: (meta.marketState || '').toUpperCase(),
+        lastTradeTimestamp: meta.regularMarketTime || null,
+        exchange: meta.exchangeName || null
       });
-    } catch (e) { /* skip */ }
+    } catch (e) { /* skip failed symbol */ }
   }
-  return { source: 'v8-chart-1d-fallback', quotes: results };
+
+  if (!results.length) throw new Error('No data returned from Yahoo');
+
+  return {
+    results: results,
+    marketStatus: marketStatus,
+    lastTs: lastTs,
+    debug: debugInfo
+  };
 }
 
 export async function onRequestOptions() {
@@ -130,78 +192,15 @@ export async function onRequestOptions() {
 
 export async function onRequestGet() {
   try {
-    // Fetch quotes and sparklines in parallel
-    var [quoteResult, sparklines] = await Promise.all([
-      fetchQuotes(),
-      fetchSparklines()
-    ]);
-
-    var rawQuotes = quoteResult.quotes;
-    var source = quoteResult.source;
-    var results = [];
-    var marketState = '';
-
-    for (var i = 0; i < rawQuotes.length; i++) {
-      var q = rawQuotes[i];
-      var sym = normalizeSymbol(q.symbol || '');
-
-      var price = Number(q.regularMarketPrice);
-      var prevClose = Number(q.regularMarketPreviousClose);
-      var change = Number(q.regularMarketChange);
-      var changePct = Number(q.regularMarketChangePercent);
-
-      // If change data is missing, compute from price & prevClose
-      if (!isFinite(change) && isFinite(price) && isFinite(prevClose) && prevClose > 0) {
-        change = Math.round((price - prevClose) * 100) / 100;
-        changePct = ((price - prevClose) / prevClose) * 100;
-      }
-
-      var state = (q.marketState || '').toUpperCase();
-      if (!marketState && state) marketState = state;
-
-      // Get sparkline and append current price
-      var spark = (sparklines[sym] || []).slice();
-      if (isFinite(price) && (spark.length === 0 || spark[spark.length - 1] !== Math.round(price * 100) / 100)) {
-        spark.push(Math.round(price * 100) / 100);
-      }
-
-      results.push({
-        symbol: sym,
-        price: isFinite(price) ? price : null,
-        previousClose: isFinite(prevClose) ? prevClose : null,
-        changesPercentage: isFinite(changePct) ? changePct : null,
-        change: isFinite(change) ? change : null,
-        sparkline: spark,
-        marketState: state,
-        lastTradeTimestamp: q.regularMarketTime || null,
-        exchange: q.exchangeName || q.fullExchangeName || null
-      });
-    }
-
-    if (!results.length) throw new Error('No data returned');
-
-    // Determine market status
-    var isOpen = marketState === 'REGULAR';
-    var isPrePost = marketState === 'PRE' || marketState === 'POST' || marketState === 'POSTPOST';
-    var lastTs = results[0] && results[0].lastTradeTimestamp ? results[0].lastTradeTimestamp : null;
+    var data = await fetchAllData();
 
     return jsonResp(200, {
       ok: true,
-      quotes: results,
-      marketStatus: isOpen ? 'open' : (isPrePost ? 'prepost' : 'closed'),
-      marketState: marketState,
-      lastUpdated: lastTs,
-      source: source,
-      _debug: {
-        rawMarketState: marketState,
-        firstQuote: results[0] ? {
-          price: results[0].price,
-          prevClose: results[0].previousClose,
-          change: results[0].change,
-          changePct: results[0].changesPercentage
-        } : null,
-        fetchedAt: new Date().toISOString()
-      }
+      quotes: data.results,
+      marketStatus: data.marketStatus,
+      lastUpdated: data.lastTs,
+      source: 'yahoo-v8-chart',
+      _debug: data.debug
     });
   } catch (err) {
     return jsonResp(200, { ok: false, error: err.message || 'Failed.', quotes: [], _debug: { error: String(err) } });
